@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Herdr remote: log in</title>
+<link rel="stylesheet" href="/app.css">
+<script src="/login.js" defer></script>
+</head>
+<body>
+<main>
+  <h1>Herdr remote</h1>
+  <form id="login" class="stack">
+    <label for="passcode">Passcode</label>
+    <input id="passcode" type="password" autocomplete="current-password" autofocus required>
+    <p id="error" class="error" role="alert" hidden></p>
+    <button id="submit" class="primary wide" type="submit">Log in</button>
+  </form>
+</main>
+</body>
+</html>

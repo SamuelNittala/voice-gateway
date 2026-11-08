@@ -1,0 +1,15 @@
+# Secrets and runtime state (passcode hash, API keys, speech token, remembered bases, v1 jobs)
+data/
+
+# Leftover output and a nested git repo from v1
+workspace/
+
+# Old version, kept locally only
+archive-v1/
+
+# Python
+__pycache__/
+*.pyc
+
+# Temporary files written next to the real ones
+*.tmp

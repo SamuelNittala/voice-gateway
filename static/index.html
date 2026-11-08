@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Herdr remote</title>
+<link rel="stylesheet" href="/app.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<main>
+  <div class="voice-row">
+    <details id="settings" class="settings">
+      <summary>Voice settings</summary>
+      <fieldset>
+        <legend>Speaker</legend>
+        <label><input id="engine-chatterbox" type="radio" name="engine" value="chatterbox"> Chatterbox</label>
+        <label><input id="engine-deepgram" type="radio" name="engine" value="deepgram"> Deepgram</label>
+        <label><input id="engine-phone" type="radio" name="engine" value="phone"> Phone voice</label>
+      </fieldset>
+      <fieldset>
+        <legend>Dictation</legend>
+        <label><input id="dictation-chrome" type="radio" name="dictation" value="chrome"> Chrome speech</label>
+        <label><input id="dictation-whisper" type="radio" name="dictation" value="whisper"> Local Whisper</label>
+      </fieldset>
+      <p id="local-note" class="hint" hidden></p>
+    </details>
+    <button id="mute" class="mute" type="button" aria-pressed="false">Voice on</button>
+  </div>
+  <p id="banner" class="banner" role="alert" hidden></p>
+  <p id="announce" class="note" role="status" hidden></p>
+  <p id="voice-note" class="hint" role="status" hidden></p>
+
+  <section id="list-view">
+    <div class="head">
+      <h1>Worktrees</h1>
+      <a id="other" class="other" rel="noopener noreferrer" hidden>Other machine</a>
+    </div>
+    <button id="new-worktree" class="wide" type="button">New worktree</button>
+    <div id="groups"></div>
+  </section>
+
+  <section id="new-view" hidden>
+    <button id="new-back" type="button">All worktrees</button>
+    <h1>New worktree</h1>
+    <p id="new-note" class="note" hidden></p>
+    <p class="hint">Say or type which repo and what it is for, then tap Plan. Nothing is created until you tap Create.</p>
+  </section>
+
+  <section id="detail-view" hidden>
+    <button id="back" type="button">All worktrees</button>
+    <h1 id="detail-name" class="name"></h1>
+    <p id="detail-state" class="state"></p>
+    <p id="problem" class="note" hidden></p>
+    <ul id="detail-agents" class="agents"></ul>
+
+    <button id="earlier-toggle" class="wide" type="button" hidden>Earlier output</button>
+    <pre id="earlier" class="text" tabindex="0" hidden></pre>
+    <pre id="output" class="text" tabindex="0" hidden></pre>
+
+    <div id="keys" class="keys" hidden>
+      <button type="button" data-key="1">1</button>
+      <button type="button" data-key="2">2</button>
+      <button type="button" data-key="up">Up</button>
+      <button type="button" data-key="down">Down</button>
+      <button type="button" data-key="enter">Enter</button>
+      <button type="button" data-key="esc">Esc</button>
+    </div>
+
+    <button id="stop" class="danger wide" type="button" hidden>Stop</button>
+
+    <div id="restart-box" class="stack" hidden>
+      <button id="restart" class="wide" type="button">Restart this session</button>
+      <div id="restart-ask" class="stack" hidden>
+        <p>Start this session again? Its saved agents come back too.</p>
+        <div class="row">
+          <button id="restart-confirm" class="primary" type="button">Yes, restart</button>
+          <button id="restart-cancel" type="button">Cancel</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- The text box, shared by a worktree's detail view (Send) and the new worktree view (Plan). -->
+  <div id="compose" class="stack" hidden>
+    <button id="mic" class="mic" type="button">Speak</button>
+    <p id="hint" class="hint" hidden>Tap the mic on your keyboard to dictate.</p>
+    <label id="text-label" class="sr" for="text">Message for the orchestrator</label>
+    <textarea id="text" rows="4" maxlength="8000" placeholder="Message for the orchestrator"></textarea>
+    <button id="send" class="primary wide" type="button">Send</button>
+    <button id="plan" class="primary wide" type="button" hidden>Plan</button>
+    <p id="draft-warning" class="hint" hidden>Text already in the box at the Mac would be sent too.</p>
+    <p id="send-note" class="hint" hidden></p>
+
+    <div id="plan-card" class="plan stack" hidden>
+      <p id="plan-repo" class="name"></p>
+      <p id="plan-branch"></p>
+      <p id="plan-mode" class="state"></p>
+      <p id="plan-base" class="hint"></p>
+      <p id="plan-base-note" class="note" hidden></p>
+      <p id="plan-fetch-note" class="hint" hidden></p>
+      <div id="plan-bases" class="choices" hidden></div>
+      <div id="plan-base-other" class="row" hidden>
+        <label class="sr" for="plan-base-input">Another base branch</label>
+        <input id="plan-base-input" type="text" maxlength="100" autocomplete="off" autocapitalize="off"
+               spellcheck="false" placeholder="Another base, such as dev">
+        <button id="plan-base-use" type="button">Use base</button>
+      </div>
+      <p id="plan-path" class="hint"></p>
+      <div class="row">
+        <button id="plan-create" class="primary" type="button">Create</button>
+        <button id="plan-offline" class="primary" type="button" hidden></button>
+        <button id="plan-cancel" type="button">Cancel</button>
+      </div>
+    </div>
+
+    <div id="candidates" class="plan stack" hidden>
+      <p id="candidates-question"></p>
+      <div id="candidate-list" class="stack"></div>
+    </div>
+  </div>
+</main>
+</body>
+</html>
