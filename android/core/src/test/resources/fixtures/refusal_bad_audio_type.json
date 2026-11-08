@@ -1,0 +1,8 @@
+{
+  "status": 415,
+  "headers": {},
+  "body": {
+    "error": "The recording must be webm, ogg, mp4 or wav audio.",
+    "reason": "bad_audio_type"
+  }
+}

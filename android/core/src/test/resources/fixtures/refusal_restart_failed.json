@@ -1,0 +1,8 @@
+{
+  "status": 502,
+  "headers": {},
+  "body": {
+    "error": "wt up failed: wt: session did not come up",
+    "reason": "restart_failed"
+  }
+}

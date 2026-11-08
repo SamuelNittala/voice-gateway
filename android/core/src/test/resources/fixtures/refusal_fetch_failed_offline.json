@@ -1,0 +1,16 @@
+{
+  "status": 502,
+  "headers": {},
+  "body": {
+    "error": "Could not fetch origin/production-4.6.1: this repo has no usable origin. Nothing was created.",
+    "reason": "fetch_failed",
+    "offline": {
+      "plan_id": "0000000000000000000000000000004f",
+      "ref": "origin/production-4.6.1",
+      "sha": "9011668",
+      "subject": "on production-4.6.1",
+      "fetched_at": null,
+      "committed_at": 1793523600
+    }
+  }
+}

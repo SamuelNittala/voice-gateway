@@ -1,0 +1,19 @@
+{
+  "status": 200,
+  "headers": {},
+  "body": {
+    "ok": true,
+    "session": "wt-web-app-fix-login-timeout",
+    "listed": true,
+    "path": "~/worktrees/web-app/fix-login-timeout",
+    "base": {
+      "ref": "origin/production-4.6.2",
+      "sha": "9998b76",
+      "subject": "fix the session timeout",
+      "fetched": true,
+      "moved": false,
+      "planned_sha": "9998b76"
+    },
+    "launch": null
+  }
+}

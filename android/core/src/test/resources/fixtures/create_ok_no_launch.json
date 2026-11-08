@@ -1,0 +1,19 @@
+{
+  "status": 200,
+  "headers": {},
+  "body": {
+    "ok": true,
+    "session": "wt-web-app-fix-second",
+    "listed": true,
+    "path": "~/worktrees/web-app/fix-second",
+    "base": {
+      "ref": "origin/main",
+      "sha": "2cd9c8f",
+      "subject": "first commit",
+      "fetched": true,
+      "moved": false,
+      "planned_sha": "2cd9c8f"
+    },
+    "launch": null
+  }
+}

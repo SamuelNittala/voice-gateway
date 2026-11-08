@@ -1,0 +1,25 @@
+{
+  "status": 200,
+  "headers": {},
+  "body": {
+    "kind": "plan",
+    "plan_id": "00000000000000000000000000000040",
+    "repo": {
+      "id": "85dfc701aea8",
+      "name": "web-app",
+      "where": "code"
+    },
+    "branch": "fix/login-timeout",
+    "mode": "existing",
+    "ready": true,
+    "base": {
+      "applies": false,
+      "ref": "fix/login-timeout",
+      "sha": "c476f9d",
+      "subject": "on develop",
+      "message": "The base does not apply: the existing branch is checked out as it is."
+    },
+    "path": "~/worktrees/web-app/fix-login-timeout",
+    "expires_in": 300
+  }
+}

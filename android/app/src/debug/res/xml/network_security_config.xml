@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Debug builds only (replaces the main config). Plan section 1 wants cleartext only to the tailnet (100.64.0.0/10)
+  and the emulator's host (10.0.2.2). A network security config can name hosts but not an IP range, so it cannot
+  express the tailnet; cleartext is therefore permitted here and the range is enforced by the app's only entry
+  point for a URL, validateBaseUrl(.., DEBUG), which accepts http:// for exactly those addresses. Release builds
+  use src/main/res/xml/network_security_config.xml (no cleartext at all). User-added CAs are never trusted.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

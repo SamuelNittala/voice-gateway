@@ -1,0 +1,10 @@
+{
+  "status": 429,
+  "headers": {
+    "Retry-After": "31"
+  },
+  "body": {
+    "error": "Too many wrong attempts. Try again in 31 seconds.",
+    "retry_after": 31
+  }
+}

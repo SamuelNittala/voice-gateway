@@ -1,0 +1,36 @@
+{
+  "status": 200,
+  "headers": {},
+  "body": {
+    "kind": "plan",
+    "plan_id": "0000000000000000000000000000003a",
+    "repo": {
+      "id": "85dfc701aea8",
+      "name": "web-app",
+      "where": "code"
+    },
+    "branch": "fix/login-timeout",
+    "mode": "new",
+    "ready": true,
+    "base": {
+      "applies": true,
+      "name": "production-4.6.2",
+      "ref": "origin/production-4.6.2",
+      "how": "named",
+      "sha": "9998b76",
+      "subject": "fix the session timeout",
+      "committed_at": 1793523600,
+      "fetched_at": 1793523600,
+      "local": true,
+      "said": "production 4.6.2",
+      "message": "",
+      "choices": [
+        "main",
+        "develop",
+        "uat"
+      ]
+    },
+    "path": "~/worktrees/web-app/fix-login-timeout",
+    "expires_in": 300
+  }
+}

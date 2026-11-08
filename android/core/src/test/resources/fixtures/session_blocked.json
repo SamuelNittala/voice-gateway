@@ -1,0 +1,48 @@
+{
+  "status": 200,
+  "headers": {},
+  "body": {
+    "name": "wt-scratch",
+    "state": "running",
+    "agents": [
+      {
+        "name": "claude",
+        "kind": "claude",
+        "pane_label": "",
+        "status": "blocked",
+        "orchestrator": true
+      }
+    ],
+    "orchestrator": {
+      "name": "claude",
+      "kind": "claude",
+      "status": "blocked",
+      "pane_label": ""
+    },
+    "problem": "",
+    "output": "Do you want to make this edit?\n❯ 1. Yes\n  2. No\n",
+    "screen_token": "7975a1135b82cbb9fd34950348aef2ec",
+    "draft": "unknown",
+    "actions": {
+      "prompt": false,
+      "keys": [
+        "1",
+        "2",
+        "up",
+        "down",
+        "enter",
+        "esc"
+      ],
+      "stop": false,
+      "restart": false
+    },
+    "events": [],
+    "waiting": [],
+    "voice": "browser",
+    "voices": [],
+    "local": {
+      "configured": false,
+      "reason": "Local speech is not set up."
+    }
+  }
+}

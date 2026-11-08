@@ -1,0 +1,40 @@
+{
+  "status": 200,
+  "headers": {},
+  "body": {
+    "kind": "plan",
+    "plan_id": "0000000000000000000000000000004a",
+    "repo": {
+      "id": "85dfc701aea8",
+      "name": "web-app",
+      "where": "code"
+    },
+    "branch": "fix/login-timeout",
+    "mode": "new",
+    "ready": false,
+    "base": {
+      "applies": true,
+      "name": null,
+      "ref": null,
+      "how": null,
+      "sha": null,
+      "subject": null,
+      "committed_at": null,
+      "fetched_at": null,
+      "local": false,
+      "said": "production 4.6",
+      "message": "No branch from origin is exactly \"production 4.6\". Pick one, or type another.",
+      "choices": [
+        "production-4.6.0",
+        "production-4.6.1",
+        "production-4.6.2",
+        "production-4.6.3",
+        "main",
+        "develop",
+        "uat"
+      ]
+    },
+    "path": "~/worktrees/web-app/fix-login-timeout",
+    "expires_in": 300
+  }
+}

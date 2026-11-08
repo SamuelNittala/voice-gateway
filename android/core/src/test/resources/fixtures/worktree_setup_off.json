@@ -1,0 +1,10 @@
+{
+  "status": 200,
+  "headers": {},
+  "body": {
+    "enabled": false,
+    "interpreter": true,
+    "repos": 0,
+    "message": "New worktrees are off. Set VOICE_GATEWAY_REPO_ROOTS to the folders that hold your repos (absolute paths, colon separated; unset means ~/work and ~/personal), then restart the gateway."
+  }
+}

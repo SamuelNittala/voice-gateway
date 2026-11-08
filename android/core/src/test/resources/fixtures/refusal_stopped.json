@@ -1,0 +1,8 @@
+{
+  "status": 409,
+  "headers": {},
+  "body": {
+    "error": "wt-scratch is stopped.",
+    "reason": "stopped"
+  }
+}

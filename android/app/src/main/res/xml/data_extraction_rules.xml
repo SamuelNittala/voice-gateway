@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 12+ (plan section 1): nothing leaves the phone by cloud backup or device transfer. The DataStore files
+  (files/datastore/: settings, and the cookie and passcode as ciphertext) are named explicitly; every domain is
+  excluded as well. The Keystore key never leaves the device, so ciphertext copied elsewhere would be useless anyway.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="file" path="datastore/" />
+        <exclude domain="root" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="external" path="." />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="file" path="datastore/" />
+        <exclude domain="root" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="external" path="." />
+    </device-transfer>
+</data-extraction-rules>

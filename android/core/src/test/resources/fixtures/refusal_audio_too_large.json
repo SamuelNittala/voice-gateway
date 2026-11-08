@@ -1,0 +1,8 @@
+{
+  "status": 413,
+  "headers": {},
+  "body": {
+    "error": "body too large",
+    "reason": "audio_too_large"
+  }
+}

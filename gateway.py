@@ -31,6 +31,11 @@ Every request must pass the Host allowlist and the identity check. POST also nee
 an allowed Origin. API routes and the app page also need a login cookie; only the login page and its files do not.
 Prompts, passcodes and pane output are never written to the log.
 
+The native Android app uses these same routes, with no route of its own: it sends the Origin of its configured URL on
+every POST, `"voice": true` on spoken prompts (which refuses commands and known Whisper noise and asks the agent to
+clarify instead of acting), `"confirm": "tap"` with it on the Yes or No tap of a confirmation (a different
+instruction: the answer is certain, not misheard), and reads the `reason` of refusals and the `ask` of summaries.
+
 Environment: VOICE_GATEWAY_BIND (the tailnet address by default, or 127.0.0.1 behind Tailscale Serve),
 VOICE_GATEWAY_PORT, VOICE_GATEWAY_DATA, VOICE_GATEWAY_TAILNET_IP, VOICE_GATEWAY_HOSTS (comma separated, replacing the
 names read from Tailscale), VOICE_GATEWAY_OTHER_URL (https on a ts.net host: link to the other machine's page),
@@ -114,6 +119,16 @@ MAX_EVENTS = 32
 MAX_ACK_IDS = 64
 MAX_SPOKEN_CONTINUATION_LINES = 8
 SPOKEN_PLACEHOLDER = "your spoken summary"
+
+# Voice prompts from the Android app. Whisper's commonest inventions on silence or noise, in is_voice_noise's form.
+VOICE_NOISE_PHRASES = ("thank you", "thanks for watching", "thank you for watching", "you", "bye", "okay", "so",
+                       "please subscribe", "subtitles by the amara org community", "i m sorry")
+# A spoken reply approves a proposed step only if it is one of these whole phrases, in normalise_phrase's form.
+VOICE_APPROVAL_PHRASES = ("yes go ahead", "yes do it", "yes please proceed", "yes thats right")
+# A question with one of these whole words is confirmed by a tap, never by voice. Words to look for in the agent's
+# question, never anything this gateway runs, so they are one split string rather than quoted words.
+VOICE_DESTRUCTIVE_WORDS = frozenset(("delete remove rm overwrite force push drop reset rebase wipe purge truncate "
+                                     "deploy publish pay purchase charge").split())
 
 # After an action, the next one on that session waits this long. Herdr can still report idle or blocked just after
 # input arrives, so holding a lock during the send cannot stop a double tap on its own.
@@ -235,6 +250,9 @@ _NUMBER_WORDS = {word: str(number) for number, word in enumerate(
     "zero one two three four five six seven eight nine ten eleven twelve".split())}
 _SHA_RE = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 _REFLOG_TIME_RE = re.compile(r"@\{([0-9]{1,12})\}$")
+# The one line `wt` prints when it starts a new orchestrator. Anything else is no launch, never an error.
+_WT_LAUNCH_RE = re.compile(r"wt-launch: model=([a-z0-9.-]{1,64}|default) effort=(low|medium|high|xhigh|max|default) "
+                           r"playbook=(yes|no) settings=(yes|no) trust=(written|already|skipped|off)")
 _NATIVE_MAGIC = frozenset({b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xfe\xed\xfa\xce",
                            b"\xca\xfe\xba\xbe", b"\x7fELF"})  # Mach-O 64, 32, both byte orders, universal; ELF.
 
@@ -282,12 +300,13 @@ class InterpreterNotConfigured(Exception):
 
 
 class RequestRejected(Exception):
-    def __init__(self, status, message, retry_after=None, extra=None):
+    """`reason` is a fixed machine-readable code for the app, never text, paths or a service's words."""
+    def __init__(self, status, message, retry_after=None, extra=None, reason=None):
         super().__init__(message)
         self.status = status
         self.message = message
         self.retry_after = retry_after
-        self.extra = extra or {}
+        self.extra = {**({"reason": reason} if reason else {}), **(extra or {})}
 
 
 @dataclass(frozen=True)
@@ -307,6 +326,19 @@ class Orchestrator:
 
 
 # ---------------------------------------------------------------- pure functions: sessions and agents
+
+def parse_wt_launch(stdout):
+    """The last line of wt's stdout that is exactly a `wt-launch:` line, as a dict, or None."""
+    if not isinstance(stdout, str):
+        return None
+    for line in reversed(stdout.split("\n")):
+        found = _WT_LAUNCH_RE.fullmatch(line)
+        if found:
+            model, effort, playbook, settings, trust = found.groups()
+            return {"model": model, "effort": effort, "playbook": playbook == "yes", "settings": settings == "yes",
+                    "trust": trust}
+    return None
+
 
 def valid_session_name(value):
     return isinstance(value, str) and _SESSION_NAME_RE.fullmatch(value) is not None
@@ -794,14 +826,70 @@ def new_nonce():
     return secrets.token_hex(4)
 
 
-def summary_instruction(nonce):
-    """One line, ending in a placeholder. An echo of this that wraps so the tag starts a line is told apart by it."""
-    return (f"(Sent from my phone. End your reply with one final line of at most two plain sentences, written to be "
-            f"read aloud, with no code, paths or markdown, in exactly this form: SPOKEN[{nonce}]: {SPOKEN_PLACEHOLDER})")
+def normalise_phrase(text):
+    """Lowercase, apostrophes dropped (`that's` is `thats`), any other run of non-letters and non-digits one space."""
+    text = text.lower().replace("'", "").replace("\u2019", "")
+    return re.sub(r"[\W_]+", " ", text).strip()
 
 
-def with_summary_instruction(text, nonce):
-    return f"{text} {summary_instruction(nonce)}"
+def is_voice_noise(text):
+    """Whether spoken text is, as a whole, one of Whisper's inventions. Apostrophes count as spaces (`i m sorry`)."""
+    return re.sub(r"[\W_]+", " ", text.lower()).strip() in VOICE_NOISE_PHRASES
+
+
+def _voice_clause():
+    phrases = ", ".join(VOICE_APPROVAL_PHRASES)
+    return ("Sent from my phone by voice, so the words may be misheard. If the request is unclear, ambiguous, risky, "
+            "or looks like a speech-recognition mistake, do not act on it: change nothing and run nothing, and instead "
+            "ask one short question, writing your spoken line as ASK: followed by the question, ending with a question "
+            "mark. If the question is whether to do something destructive or hard to undo (deleting or overwriting "
+            "files, branches or data, git push or force push, reset or rebase that drops work, dropping or migrating a "
+            "database, deploying, or anything that spends money), write ASK!: instead of ASK:, even if the request "
+            "itself was clear; such a step is confirmed by a tap on the phone, never by voice. A spoken reply to an "
+            "ASK: question approves the proposed step if it is a plain yes, sure, go ahead or the like, unless the "
+            f"step is destructive or hard to undo: then it approves only if it is exactly one of: {phrases} (ignoring "
+            "case and punctuation), and a bare yes, yeah, sure or okay is not approval, so ask again with ASK!:.")
+
+
+# The Yes or No button of the app's tap-only confirmation: the words are fixed, so nothing about them is misheard.
+_TAP_CLAUSE = ("Sent from my phone by a tap on the Yes or No button shown for your last ASK!: or ASK: question, so "
+               "this reply is certain and was not misheard: it is the user's explicit approval or refusal of that "
+               "step. Ask any new question with ASK: or ASK!: as before.")
+
+
+def summary_instruction(nonce, voice=False, tap=False):
+    """One line, ending in a placeholder. An echo of this that wraps so the tag starts a line is told apart by it.
+    A voice prompt gets the clarify clause first, or the tap clause for a Yes or No tap, so the line still ends in
+    the placeholder. `tap` counts only with `voice`."""
+    opening = (_TAP_CLAUSE if tap else _voice_clause()) if voice else "Sent from my phone."
+    return (f"({opening} End your reply with one final line of at most two plain sentences, written to be read aloud, "
+            f"with no code, paths or markdown, in exactly this form: SPOKEN[{nonce}]: {SPOKEN_PLACEHOLDER})")
+
+
+def with_summary_instruction(text, nonce, voice=False, tap=False):
+    return f"{text} {summary_instruction(nonce, voice, tap)}"
+
+
+_ASK_RE = re.compile(r"\s*ASK(!?):(.*)", re.IGNORECASE | re.DOTALL)
+
+
+def split_ask(text):
+    """(ask, text) for a voice prompt's spoken line: `ask` is True for an `ASK:` question, "confirm" for `ASK!:` or
+    an `ASK:` question with a destructive word, else False with the text unchanged. The marker is never spoken. An
+    empty question is no spoken line at all: (False, None)."""
+    match = _ASK_RE.match(text)
+    if match is None:
+        return False, text
+    rest = " ".join(match.group(2).split())
+    if not rest.strip("? "):
+        return False, None
+    if len(rest) > MAX_SPOKEN_CHARS - 1:
+        cut = rest[:MAX_SPOKEN_CHARS - 1]
+        rest = (cut.rsplit(" ", 1)[0] if " " in cut else cut).rstrip(" ,;:-")
+    if not rest.endswith("?"):
+        rest += "?"
+    destructive = not VOICE_DESTRUCTIVE_WORDS.isdisjoint(normalise_phrase(rest).split())
+    return ("confirm" if match.group(1) or destructive else True), rest
 
 
 def clean_spoken(text):
@@ -2031,9 +2119,10 @@ class Herdr:
 
 class PendingSend:
     """What a phone send is waiting for. One per session, in memory only."""
-    def __init__(self, session, nonce, sent_at, pane_id, terminal_id):
+    def __init__(self, session, nonce, sent_at, pane_id, terminal_id, voice=False):
         self.session, self.nonce, self.sent_at = session, nonce, sent_at
         self.pane_id, self.terminal_id = pane_id, terminal_id
+        self.voice = voice  # Sent by the app's voice loop: its spoken line may be a question for the app.
         self.announced = False  # The final event, `summary` or `check-screen`, has been made.
         self.blocked = False  # The last poll saw a dialog, so `needs-you` was already said for it.
         self.quiet_since = None
@@ -2048,8 +2137,8 @@ class Announcements:
         self.pending = {}  # session -> PendingSend
         self.events = {}  # id -> event, oldest first
 
-    def arm(self, session, nonce, orchestrator):
-        record = PendingSend(session, nonce, self.clock.now(), orchestrator.pane_id, orchestrator.terminal_id)
+    def arm(self, session, nonce, orchestrator, voice=False):
+        record = PendingSend(session, nonce, self.clock.now(), orchestrator.pane_id, orchestrator.terminal_id, voice)
         with self.lock:
             self.pending[session] = record
 
@@ -2081,24 +2170,26 @@ class Announcements:
                 record.quiet_since = now
             return now - record.quiet_since >= SETTLE_SECONDS
 
-    def emit(self, record, kind, text, final=True):
+    def emit(self, record, kind, text, final=True, ask=False):
         with self.lock:
             if not self._current(record):
                 return
             if final:
                 record.announced = True
-            self._add(record, kind, text)
+            self._add(record, kind, text, ask)
 
     def _current(self, record):
         """Only the latest send on a session, and only until its final event."""
         return not record.announced and self.pending.get(record.session) is record
 
-    def _add(self, record, kind, text):
+    def _add(self, record, kind, text, ask=False):
         event_id = secrets.token_hex(8)
         while event_id in self.events:
             event_id = secrets.token_hex(8)
         self.events[event_id] = {"id": event_id, "kind": kind, "session": record.session,
                                  "worktree": spoken_name(record.session), "text": clean_spoken(text)}
+        if ask:  # Only a voice prompt's question: True, or "confirm" for one answered by a tap.
+            self.events[event_id]["ask"] = ask
         while len(self.events) > MAX_EVENTS:
             self.events.pop(next(iter(self.events)))
 
@@ -2331,30 +2422,30 @@ class NewWorktrees:
     # Plan
     def plan(self, payload):
         if not self.enabled:
-            raise RequestRejected(409, self._off_message())
+            raise RequestRejected(409, self._off_message(), reason="worktrees_off")
         if "plan_id" in payload:
             return self._plan_again(payload)
         if not getattr(self.interpreter, "configured", False):
-            raise RequestRejected(409, self._not_set_up())
+            raise RequestRejected(409, self._not_set_up(), reason="interpreter_off")
         query = self._query(payload.get("query"))
         repos = self.index.repos()
         offered = repos
         if "repo_id" in payload:
             chosen = payload.get("repo_id")
             if not isinstance(chosen, str) or _REPO_ID_RE.fullmatch(chosen) is None:
-                raise RequestRejected(400, "That repo id is not usable.")
+                raise RequestRejected(400, "That repo id is not usable.", reason="bad_repo")
             offered = [repo for repo in repos if repo.id == chosen]
             if not offered:
-                raise RequestRejected(404, "That repo is not in the list any more.")
+                raise RequestRejected(404, "That repo is not in the list any more.", reason="repo_gone")
         if not repos:
-            raise RequestRejected(409, f"No repos were found in {self._roots_text()}.")
+            raise RequestRejected(409, f"No repos were found in {self._roots_text()}.", reason="no_repos")
         with self._one_plan():
             return self._plan(query, offered, repos)
 
     @contextmanager
     def _one_plan(self):
         if not self.plan_lock.acquire(blocking=False):
-            raise RequestRejected(409, "Another plan is still being worked out.")
+            raise RequestRejected(409, "Another plan is still being worked out.", reason="plan_busy")
         try:
             yield
         finally:
@@ -2363,19 +2454,19 @@ class NewWorktrees:
     @staticmethod
     def _query(value):
         if not isinstance(value, str):
-            raise RequestRejected(400, "Say or type which repo, and what the worktree is for.")
+            raise RequestRejected(400, "Say or type which repo, and what the worktree is for.", reason="bad_query")
         query = one_line(value)
         if not query:
-            raise RequestRejected(400, "Say or type which repo, and what the worktree is for.")
+            raise RequestRejected(400, "Say or type which repo, and what the worktree is for.", reason="bad_query")
         if len(query) > MAX_QUERY_CHARS:
-            raise RequestRejected(400, f"The request is longer than {MAX_QUERY_CHARS} characters.")
+            raise RequestRejected(400, f"The request is longer than {MAX_QUERY_CHARS} characters.", reason="bad_query")
         return query
 
     def _plan(self, query, offered, repos):
         try:
             raw = self.interpreter.plan(query, [repo.view() for repo in offered])
         except InterpreterNotConfigured:
-            raise RequestRejected(409, self._not_set_up()) from None
+            raise RequestRejected(409, self._not_set_up(), reason="interpreter_off") from None
         except InterpreterError as error:
             return self._not_understood(repos, str(error)[:80] or "it failed")
         except Exception:
@@ -2398,17 +2489,18 @@ class NewWorktrees:
         came from stays as it was."""
         plan_id, said = payload.get("plan_id"), payload.get("base")
         if not isinstance(plan_id, str) or _PLAN_ID_RE.fullmatch(plan_id) is None:
-            raise RequestRejected(400, "The plan id is missing.")
+            raise RequestRejected(400, "The plan id is missing.", reason="bad_plan")
         said = one_line(said) if isinstance(said, str) else ""
         if not said or len(said) > MAX_BRANCH_CHARS:
-            raise RequestRejected(400, f"Say or type a base branch, at most {MAX_BRANCH_CHARS} characters.")
+            raise RequestRejected(400, f"Say or type a base branch, at most {MAX_BRANCH_CHARS} characters.",
+                                  reason="bad_base")
         with self.plans_lock:
             entry = self.plans.get(plan_id)
         if entry is None:
-            raise RequestRejected(404, "No such plan. Plan again.")
+            raise RequestRejected(404, "No such plan. Plan again.", reason="plan_gone")
         plan, made = entry
         if self.clock.now() - made >= PLAN_TTL_SECONDS:
-            raise RequestRejected(409, "That plan expired. Plan again.")
+            raise RequestRejected(409, "That plan expired. Plan again.", reason="plan_expired")
         repo = self._listed(plan.repo)
         with self._one_plan():
             return self._store(self._work_out(repo, plan.branch, said))
@@ -2416,7 +2508,8 @@ class NewWorktrees:
     def _listed(self, repo):
         listed = next((r for r in self.index.repos(fresh=True) if r.id == repo.id and r.path == repo.path), None)
         if listed is None:
-            raise RequestRejected(409, f"{repo.name} is not in the repo list any more. Nothing was created.")
+            raise RequestRejected(409, f"{repo.name} is not in the repo list any more. Nothing was created.",
+                                  reason="repo_unlisted")
         return listed
 
     @staticmethod
@@ -2429,9 +2522,9 @@ class NewWorktrees:
         try:
             return self.runner.run(["git", "-C", cwd, *args], timeout=GIT_TIMEOUT_SECONDS, cwd=cwd)
         except subprocess.TimeoutExpired:
-            raise RequestRejected(502, "git did not answer in time.") from None
+            raise RequestRejected(502, "git did not answer in time.", reason="git_failed") from None
         except OSError:
-            raise RequestRejected(502, "git could not be run there.") from None
+            raise RequestRejected(502, "git could not be run there.", reason="git_failed") from None
 
     def _git_remote(self, cwd, timeout, *args):
         """git that talks to origin. No terminal can prompt: GIT_TERMINAL_PROMPT=0, and its own session with output
@@ -2472,7 +2565,7 @@ class NewWorktrees:
         so none of them can reach git as an option."""
         listing = self._git(main, "for-each-ref", "--format=%(refname)%09%(committerdate:unix)", ORIGIN_PREFIX)
         if listing.returncode != 0:
-            raise RequestRejected(502, f"git could not list the branches from origin in {name}.")
+            raise RequestRejected(502, f"git could not list the branches from origin in {name}.", reason="git_failed")
         found = []
         for line in listing.stdout.splitlines():
             ref, _, when = line.partition("\t")
@@ -2508,23 +2601,25 @@ class NewWorktrees:
         common = self._git(repo.path, "rev-parse", "--path-format=absolute", "--git-common-dir")
         main = os.path.dirname(common.stdout.strip()) if common.returncode == 0 else ""
         if not main or os.path.realpath(main) != os.path.realpath(repo.path):
-            raise RequestRejected(409, f"{repo.name} is not a main checkout any more.")
+            raise RequestRejected(409, f"{repo.name} is not a main checkout any more.", reason="not_main_checkout")
         existing = self._git(main, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}")
         if existing.returncode not in (0, 1):
-            raise RequestRejected(502, f"git could not say whether {branch} exists in {repo.name}.")
+            raise RequestRejected(502, f"git could not say whether {branch} exists in {repo.name}.",
+                                  reason="git_failed")
         commit = None
         if existing.returncode == 0:
             listing = self._git(main, "worktree", "list", "--porcelain")
             if listing.returncode != 0:
-                raise RequestRejected(502, f"git could not list the worktrees of {repo.name}.")
+                raise RequestRejected(502, f"git could not list the worktrees of {repo.name}.", reason="git_failed")
             if f"refs/heads/{branch}" in checked_out_branches(listing.stdout):
-                raise RequestRejected(409, f"{branch} is already checked out in a worktree of {repo.name}.")
+                raise RequestRejected(409, f"{branch} is already checked out in a worktree of {repo.name}.",
+                                      reason="branch_checked_out")
             commit = self._commit(main, f"refs/heads/{branch}")
             if commit is None:
-                raise RequestRejected(409, f"{repo.name} has no commit at {branch} to start from.")
+                raise RequestRejected(409, f"{repo.name} has no commit at {branch} to start from.", reason="no_commit")
         target = os.path.join(self.home, WORKTREES_DIR, os.path.basename(main), wt_slug(branch))
         if os.path.lexists(target):
-            raise RequestRejected(409, f"{tilde(target, self.home)} already exists.")
+            raise RequestRejected(409, f"{tilde(target, self.home)} already exists.", reason="target_exists")
         return main, ("existing" if commit else "new"), target, commit
 
     def _work_out(self, repo, branch, said=""):
@@ -2619,10 +2714,10 @@ class NewWorktrees:
         with self.plans_lock:
             entry = self.plans.pop(plan_id, None)
         if entry is None:
-            raise RequestRejected(404, "No such plan. Plan again.")
+            raise RequestRejected(404, "No such plan. Plan again.", reason="plan_gone")
         plan, made = entry
         if self.clock.now() - made >= PLAN_TTL_SECONDS:
-            raise RequestRejected(409, "That plan expired. Plan again.")
+            raise RequestRejected(409, "That plan expired. Plan again.", reason="plan_expired")
         return plan
 
     # Create
@@ -2630,19 +2725,20 @@ class NewWorktrees:
         """`wt` runs the wt command as Gateway._wt does. `extra_env` is the restart's: the test account override.
         Only the plan decides whether to fetch: nothing in the payload but its id is read."""
         if not self.enabled:
-            raise RequestRejected(409, self._off_message())
+            raise RequestRejected(409, self._off_message(), reason="worktrees_off")
         plan_id = payload.get("plan_id")
         if not isinstance(plan_id, str) or _PLAN_ID_RE.fullmatch(plan_id) is None:
-            raise RequestRejected(400, "The plan id is missing.")
+            raise RequestRejected(400, "The plan id is missing.", reason="bad_plan")
         if not self.create_lock.acquire(blocking=False):
-            raise RequestRejected(409, "Another worktree is still being created.")
+            raise RequestRejected(409, "Another worktree is still being created.", reason="create_busy")
         try:
             plan = self._take(plan_id)
             repo = self._listed(plan.repo)
             if not self._branch_ok(repo.path, plan.branch):
-                raise RequestRejected(409, f"{plan.branch} cannot be used any more. Nothing was created.")
+                raise RequestRejected(409, f"{plan.branch} cannot be used any more. Nothing was created.",
+                                      reason="branch_unusable")
             if not plan.ready:
-                raise RequestRejected(409, "Pick a base first. Nothing was created.")
+                raise RequestRejected(409, "Pick a base first. Nothing was created.", reason="not_ready")
             copy = self._check_again(repo, plan)
             if plan.mode == "existing":
                 return self._run_wt_new(plan, wt, extra_env, None)
@@ -2654,7 +2750,8 @@ class NewWorktrees:
     def _check_again(self, repo, plan):
         """Everything worked out again must match the plan, except a new branch's base commit when it is fetched
         next. Returns the base's local copy, or None."""
-        changed = RequestRejected(409, f"{repo.name} changed since the plan. Nothing was created; plan again.")
+        changed = RequestRejected(409, f"{repo.name} changed since the plan. Nothing was created; plan again.",
+                                  reason="repo_changed")
         main, mode, target, commit = self._checkout(repo, plan.branch)
         if (main, mode, target) != (plan.main, plan.mode, plan.target):
             raise changed
@@ -2663,7 +2760,8 @@ class NewWorktrees:
                 raise changed
             return None
         if not self._branch_ok(main, plan.base):
-            raise RequestRejected(409, f"origin/{plan.base} cannot be used any more. Nothing was created.")
+            raise RequestRejected(409, f"origin/{plan.base} cannot be used any more. Nothing was created.",
+                                  reason="base_unusable")
         copy = self._local_copy(main, plan.base)
         if not plan.fetch and (copy is None or copy.sha != plan.commit.sha):
             raise changed
@@ -2693,7 +2791,8 @@ class NewWorktrees:
             extra = {"offline": {"plan_id": self._keep(offline), "ref": ref, "sha": copy.short,
                                  "subject": copy.subject, "fetched_at": copy.fetched_at,
                                  "committed_at": copy.committed_at}}
-        raise RequestRejected(502, f"Could not fetch {ref}: {reason}. Nothing was created.", extra=extra)
+        raise RequestRejected(502, f"Could not fetch {ref}: {reason}. Nothing was created.", extra=extra,
+                              reason="fetch_failed")
 
     def _run_wt_new(self, plan, wt, extra_env, final):
         shown = tilde(plan.target, self.home)
@@ -2702,9 +2801,10 @@ class NewWorktrees:
                     extra_env=extra_env)
         if result.returncode != 0:
             reason = (result.stderr or result.stdout or "").strip().splitlines()
-            raise RequestRejected(502, f"wt new failed: {one_line(reason[0], 200) if reason else 'no message'}")
+            raise RequestRejected(502, f"wt new failed: {one_line(reason[0], 200) if reason else 'no message'}",
+                                  reason="wt_failed")
         if not os.path.isdir(plan.target):
-            raise RequestRejected(502, f"wt new made no folder at {shown}.")
+            raise RequestRejected(502, f"wt new made no folder at {shown}.", reason="no_folder")
         base = None
         if plan.mode == "new":
             with suppress(OSError):  # Not remembering only changes the next default. The worktree is there.
@@ -2714,12 +2814,14 @@ class NewWorktrees:
         named = wt(["name"], plan.target, WT_NAME_TIMEOUT_SECONDS)
         name = named.stdout.strip() if named.returncode == 0 else ""
         if not valid_session_name(name):
-            raise RequestRejected(502, f"wt name gave no session name in {shown}. The worktree is there.")
+            raise RequestRejected(502, f"wt name gave no session name in {shown}. The worktree is there.",
+                                  reason="no_session_name")
         try:
             listed = any(session.name == name for session in self.herdr.sessions())
         except HerdrError:
             listed = False
-        return {"ok": True, "session": name, "listed": listed, "path": shown, "base": base}
+        return {"ok": True, "session": name, "listed": listed, "path": shown, "base": base,
+                "launch": parse_wt_launch(result.stdout)}
 
 
 # ---------------------------------------------------------------- request-level operations
@@ -2784,7 +2886,8 @@ class Gateway:
         try:
             return self.herdr.sessions()
         except HerdrError as error:
-            raise RequestRejected(502, f"Could not list Herdr sessions ({error.code}).") from None
+            raise RequestRejected(502, f"Could not list Herdr sessions ({error.code}).",
+                                  reason="herdr_failed") from None
 
     def _session(self, name):
         """The session, from a fresh listing. parse_sessions has already dropped everything but valid `wt-*` names."""
@@ -2792,12 +2895,12 @@ class Gateway:
             session = next((s for s in self._listed_sessions() if s.name == name), None)
             if session is not None:
                 return session
-        raise RequestRejected(404, "No such worktree session.")
+        raise RequestRejected(404, "No such worktree session.", reason="not_listed")
 
     def _running_session(self, name):
         session = self._session(name)
         if not session.running:
-            raise RequestRejected(409, f"{name} is stopped.")
+            raise RequestRejected(409, f"{name} is stopped.", reason="stopped")
         return session
 
     @staticmethod
@@ -2858,14 +2961,14 @@ class Gateway:
         """From a fresh listing, on every action. Refuses instead of guessing."""
         orchestrator, problem = self._derive(session, self.herdr.tabs(session), self.herdr.agents(session))
         if orchestrator is None:
-            raise RequestRejected(409, problem)
+            raise RequestRejected(409, problem, reason="no_orchestrator")
         return orchestrator
 
     def _recheck(self, session, orchestrator):
         """The state right before sending, and proof the pane still holds the same agent."""
         row = self.herdr.agent(session, orchestrator.pane_id)
         if row.get("agent") != orchestrator.kind or row.get("terminal_id") != orchestrator.terminal_id:
-            raise RequestRejected(409, "The orchestrator pane changed. Nothing was sent.")
+            raise RequestRejected(409, "The orchestrator pane changed. Nothing was sent.", reason="pane_changed")
         return self._corrected_status(session, orchestrator.kind, orchestrator.pane_id, agent_status(row))
 
     @staticmethod
@@ -2980,9 +3083,11 @@ class Gateway:
             self.announcer.working(record)
         else:
             self.announcer.unblocked(record)
-            spoken = self._spoken_on_screen(record, orchestrator)
+            spoken, ask = self._spoken_on_screen(record, orchestrator), False
+            if spoken and record.voice:  # A typed prompt's spoken line is never altered.
+                ask, spoken = split_ask(spoken)
             if spoken:
-                self.announcer.emit(record, "summary", spoken)
+                self.announcer.emit(record, "summary", spoken, ask=ask)
             elif self.announcer.quiet_long_enough(record):
                 self.announcer.emit(record, "check-screen", f"{spoken_name(name)} finished, check the screen")
 
@@ -3078,16 +3183,16 @@ class Gateway:
         """The words in one recording from the page, by the speech service's Whisper, with the repo and branch names as
         its vocabulary. Only ever fills the page's text box: nothing is sent anywhere else."""
         if self.speech is None:
-            raise RequestRejected(404, f"Local Whisper is off. {self.speech_reason}")
+            raise RequestRejected(404, f"Local Whisper is off. {self.speech_reason}", reason="speech_off")
         kind = (content_type or "").split(";", 1)[0].strip().lower() if isinstance(content_type, str) else ""
         if kind not in TRANSCRIBE_TYPES or not content_type.isprintable():
-            raise RequestRejected(415, "The recording must be webm, ogg, mp4 or wav audio.")
+            raise RequestRejected(415, "The recording must be webm, ogg, mp4 or wav audio.", reason="bad_audio_type")
         if not audio:
-            raise RequestRejected(400, "The recording is empty.")
+            raise RequestRejected(400, "The recording is empty.", reason="audio_empty")
         if len(audio) > MAX_TRANSCRIBE_BYTES:
-            raise RequestRejected(413, "The recording is too long.")
+            raise RequestRejected(413, "The recording is too long.", reason="audio_too_large")
         if not self.transcribe_lock.acquire(blocking=False):
-            raise RequestRejected(429, "A recording is already being turned into text.", 2)
+            raise RequestRejected(429, "A recording is already being turned into text.", 2, reason="transcribe_busy")
         try:
             self._count_transcription()
             names = [repo.name for repo in recent_first(self.worktrees.index.repos())] if self.worktrees.enabled else []
@@ -3095,7 +3200,8 @@ class Gateway:
                 text = self.speech.transcribe(audio, kind, speech_vocabulary(names))
             except VoiceError as error:
                 status = f"HTTP {error.status}" if error.status else "no answer"
-                raise RequestRejected(502, f"Local Whisper is not available ({status}).") from None
+                raise RequestRejected(502, f"Local Whisper is not available ({status}).",
+                                      reason="speech_failed") from None
         finally:
             self.transcribe_lock.release()
         return {"text": one_line(text, MAX_PROMPT_CHARS)}
@@ -3106,7 +3212,8 @@ class Gateway:
             self.transcribed_at.popleft()
         if len(self.transcribed_at) >= TRANSCRIBE_PER_MINUTE:
             wait = int(60 - (now - self.transcribed_at[0])) + 1
-            raise RequestRejected(429, f"Too many recordings in a minute. Try again in {wait} seconds.", wait)
+            raise RequestRejected(429, f"Too many recordings in a minute. Try again in {wait} seconds.", wait,
+                                  reason="transcribe_rate")
         self.transcribed_at.append(now)
 
     # Actions
@@ -3116,10 +3223,11 @@ class Gateway:
         with self.locks_guard:
             lock = self.locks.setdefault(name, threading.Lock())
         if not lock.acquire(blocking=False):
-            raise RequestRejected(409, "Another action on this session is still running.")
+            raise RequestRejected(409, "Another action on this session is still running.", reason="action_running")
         try:
             if self.clock.now() < self.not_before.get(name, 0):
-                raise RequestRejected(409, "That was just sent. Wait a moment, then check the output.")
+                raise RequestRejected(409, "That was just sent. Wait a moment, then check the output.",
+                                      reason="repeat_window")
             yield
         finally:
             lock.release()
@@ -3130,63 +3238,79 @@ class Gateway:
     def _herdr_rejection(self, error, sent_text=False):
         """Herdr's own refusals keep their meaning. A timeout does not prove nothing arrived."""
         if error.code == "herdr_timeout" and sent_text:
-            return RequestRejected(502, "Herdr did not answer. The text may have arrived: check the output first.")
+            return RequestRejected(502, "Herdr did not answer. The text may have arrived: check the output first.",
+                                   reason="herdr_timeout_maybe_sent")
         if error.code in ("agent_blocked", "agent_not_found", "agent_not_ready"):
-            return RequestRejected(409, f"Herdr refused: {error.code}.")
-        return RequestRejected(502, f"Herdr failed: {error.code}.")
+            return RequestRejected(409, f"Herdr refused: {error.code}.", reason="herdr_refused")
+        return RequestRejected(502, f"Herdr failed: {error.code}.", reason="herdr_failed")
 
     def prompt(self, payload):
         text = payload.get("text")
         if not isinstance(text, str):
-            raise RequestRejected(400, "Text is missing.")
+            raise RequestRejected(400, "Text is missing.", reason="bad_text")
         text = clean_text(text)
         if not text:
-            raise RequestRejected(400, "There is nothing to send.")
+            raise RequestRejected(400, "There is nothing to send.", reason="bad_text")
         if len(text) > MAX_PROMPT_CHARS:
-            raise RequestRejected(400, f"The text is longer than {MAX_PROMPT_CHARS} characters.")
+            raise RequestRejected(400, f"The text is longer than {MAX_PROMPT_CHARS} characters.", reason="bad_text")
+        voice = payload.get("voice", False)
+        if not isinstance(voice, bool):
+            raise RequestRejected(400, "voice must be true or false.", reason="bad_text")
+        if "confirm" in payload and payload["confirm"] != "tap":
+            raise RequestRejected(400, 'confirm must be "tap".', reason="bad_text")
+        tap = voice and payload.get("confirm") == "tap"  # The app's Yes or No button; ignored for typed text.
+        if voice:  # Decided from the text alone, before anything is read from Herdr.
+            if text.lstrip().startswith(("/", "!")):
+                raise RequestRejected(400, "Commands starting with / or ! are not sent by voice.",
+                                      reason="voice_command")
+            if is_voice_noise(text):
+                raise RequestRejected(422, "That sounded like noise rather than a request, so I did not send it.",
+                                      reason="voice_noise")
         name = payload.get("session")
         self._running_session(name)
         with self._action(name):
             try:
                 orchestrator = self._orchestrator(name)
-                self._require(self._recheck(name, orchestrator), SETTLED, "send text")
+                self._require(self._recheck(name, orchestrator), SETTLED, "send text", "not_settled")
                 draft = self._draft(name, orchestrator)
                 if draft == "present":
                     raise RequestRejected(409, "There is unsent text in the box at the Mac, so I did not send this. "
-                                               "That text was left as it is.")
+                                               "That text was left as it is.", reason="draft_present")
                 self._sent(name, PROMPT_REPEAT_SECONDS)  # Before sending, because a timeout may still have delivered.
-                self._send_prompt(name, orchestrator, text)
+                self._send_prompt(name, orchestrator, text, voice, tap)
             except HerdrError as error:
                 raise self._herdr_rejection(error, sent_text=True) from None
             clear_reap_marker(self.config.reap_dir, name)  # Herdr took it: `wt reap` waits its full time again.
         return {"ok": True, "draft": draft}
 
-    def _send_prompt(self, name, orchestrator, text):
+    def _send_prompt(self, name, orchestrator, text, voice=False, tap=False):
         """The record replaces the last one only if the text went, or may have: a refusal leaves the last one waiting."""
         nonce = new_nonce() if wants_summary(text) else None
         try:
-            self.herdr.prompt(name, orchestrator.pane_id, with_summary_instruction(text, nonce) if nonce else text)
+            self.herdr.prompt(name, orchestrator.pane_id,
+                              with_summary_instruction(text, nonce, voice, tap) if nonce else text)
         except HerdrError as error:
             if error.code == "herdr_timeout":
-                self.announcer.arm(name, nonce, orchestrator)
+                self.announcer.arm(name, nonce, orchestrator, voice)
             raise
-        self.announcer.arm(name, nonce, orchestrator)
+        self.announcer.arm(name, nonce, orchestrator, voice)
 
     @staticmethod
-    def _require(status, allowed, verb):
+    def _require(status, allowed, verb, reason):
         if status not in allowed:
-            raise RequestRejected(409, f"The orchestrator is {status}, so I did not {verb}.")
+            raise RequestRejected(409, f"The orchestrator is {status}, so I did not {verb}.", reason=reason,
+                                  extra={"status": status})
 
     def keys(self, payload):
         key = payload.get("key")
         if not isinstance(key, str) or key not in ALLOWED_KEYS:
-            raise RequestRejected(400, "That key is not allowed.")
+            raise RequestRejected(400, "That key is not allowed.", reason="bad_text")
         name = payload.get("session")
         self._running_session(name)
         with self._action(name):
             try:
                 orchestrator = self._orchestrator(name)
-                self._require(self._recheck(name, orchestrator), {"blocked"}, "send a key")
+                self._require(self._recheck(name, orchestrator), {"blocked"}, "send a key", "not_blocked")
                 self._require_same_screen(name, orchestrator, payload.get("screen_token"))
                 self._sent(name, NAVIGATE_REPEAT_SECONDS if key in NAVIGATION_KEYS else ACTION_REPEAT_SECONDS)
                 self.herdr.send_keys(name, orchestrator.pane_id, [key])
@@ -3200,7 +3324,8 @@ class Gateway:
         current = screen_token(screen)
         if current is None or token != current:
             raise RequestRejected(409, "The screen changed, so I did not send the key. Look at it again.",
-                                  extra={"output": screen[-MAX_OUTPUT_CHARS:], "screen_token": current})
+                                  extra={"output": screen[-MAX_OUTPUT_CHARS:], "screen_token": current},
+                                  reason="screen_changed")
 
     def stop(self, payload):
         name = payload.get("session")
@@ -3208,7 +3333,7 @@ class Gateway:
         with self._action(name):
             try:
                 orchestrator = self._orchestrator(name)
-                self._require(self._recheck(name, orchestrator), {"working"}, "send stop")
+                self._require(self._recheck(name, orchestrator), {"working"}, "send stop", "not_working")
                 self._sent(name, ACTION_REPEAT_SECONDS)
                 self.herdr.send_keys(name, orchestrator.pane_id, list(stop_keys_for(orchestrator.kind)))
             except HerdrError as error:
@@ -3219,14 +3344,19 @@ class Gateway:
         name = payload.get("session")
         session = self._session(name)
         if session.running:
-            raise RequestRejected(409, f"{name} is already running.")
+            raise RequestRejected(409, f"{name} is already running.", reason="already_running")
         with self._action(name):
-            worktree = self._confirmed_worktree(session)
-            self._sent(name, ACTION_REPEAT_SECONDS)
-            result = self._wt(["up"], worktree, WT_UP_TIMEOUT_SECONDS, detach=True, extra_env=self._restart_env())
+            try:
+                worktree = self._confirmed_worktree(session)
+                self._sent(name, ACTION_REPEAT_SECONDS)
+                result = self._wt(["up"], worktree, WT_UP_TIMEOUT_SECONDS, detach=True, extra_env=self._restart_env())
+            except RequestRejected as rejected:  # The folder could not be confirmed, or wt could not run there.
+                rejected.extra.setdefault("reason", "restart_refused" if rejected.status == 409 else "restart_failed")
+                raise
             if result.returncode != 0:
                 reason = (result.stderr or result.stdout or "").strip().splitlines()
-                raise RequestRejected(502, f"wt up failed: {reason[0] if reason else 'no message'}")
+                raise RequestRejected(502, f"wt up failed: {reason[0] if reason else 'no message'}",
+                                      reason="restart_failed")
         return {"ok": True}
 
     # New worktrees
@@ -3237,7 +3367,18 @@ class Gateway:
         return self.worktrees.plan(payload)
 
     def worktree_create(self, payload):
-        return self.worktrees.create(payload, self._wt, self._restart_env())
+        return self.worktrees.create(payload, self._wt_for_create, self._restart_env())
+
+    def _wt_for_create(self, args, cwd, timeout, detach=False, extra_env=None):
+        """`_wt` with the create path's reasons. Restart keeps its own, so they are not set in `_wt` itself."""
+        try:
+            return self._wt(args, cwd, timeout, detach=detach, extra_env=extra_env)
+        except RequestRejected as rejected:
+            if not self.config.wt:
+                rejected.extra.setdefault("reason", "wt_missing")
+            else:
+                rejected.extra.setdefault("reason", "wt_timeout" if rejected.status == 502 else "wt_unrunnable")
+            raise
 
     def _restart_env(self):
         directory = self.config.restart_claude_config_dir
@@ -3390,8 +3531,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
             return None
         return payload
 
-    def _read_body(self, limit):
-        """The body, with a Content-Length of at most `limit` and no Transfer-Encoding, or None after responding."""
+    def _read_body(self, limit, too_large=None):
+        """The body, with a Content-Length of at most `limit` and no Transfer-Encoding, or None after responding.
+        `too_large` is the refusal reason for a body over the limit, where the route has one."""
         if self.headers.get("Transfer-Encoding"):
             self._json(411, {"error": "content length required"})
             return None
@@ -3401,7 +3543,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             return None
         length = int(raw_length)
         if length > limit:
-            self._json(413, {"error": "body too large"})
+            self._json(413, {"error": "body too large", **({"reason": too_large} if too_large else {})})
             return None
         body = self.rfile.read(length)
         if len(body) != length:
@@ -3416,7 +3558,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
         if not origin_allowed(_single_header(self.headers, "Origin"), config.allowed_hosts, config.port):
             self._json(403, {"error": "origin not allowed"})
             return
-        audio = self._read_body(MAX_TRANSCRIBE_BYTES)
+        audio = self._read_body(MAX_TRANSCRIBE_BYTES, too_large="audio_too_large")
         if audio is None:
             return
         try:

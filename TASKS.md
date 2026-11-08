@@ -44,6 +44,7 @@ Security
 
 Page
 - List, detail, login. Output through textContent only. Speech only fills the text box; Send is always a separate tap.
+  This is the web page's rule and stays so; the Android app (below) sends spoken text by itself.
 - Keys shown only when `blocked`, Stop only when `working`, Restart with an in-page confirm on stopped sessions.
 - `VOICE_GATEWAY_OTHER_URL` (https on a ts.net host) shows a link to the other machine's page.
 
@@ -328,19 +329,353 @@ Local speech on NixOS (approved 2026-11-08; adds to the voice sections above, wh
 - CSP unchanged unless the browser shows a need: the mic is not under CSP, `/api/transcribe` is 'self', and MediaSource
   already has `media-src 'self' blob:`.
 
+Android app (2026-11-08; plan in ~/.claude/plans/android-voice-app.md; adds to the sections above, which still hold
+unless said here)
+- A native Kotlin app at `android/` drives one `wt-*` worktree by voice. Hands-free loop: tap once; the app listens,
+  detects end of speech on the phone, transcribes with Local Whisper through `POST /api/transcribe`, sends the text
+  with `POST /api/prompt` at once, speaks the agent's `summary` event, then listens again. Tap while speaking stops
+  the audio and starts listening; the mic is off while speaking.
+- Auto-send (user's decision): no cancel window and no confirm step of any kind; the user does not look at the screen.
+  A short "sent" earcon plays on every send. A wrong request can go through; the backstops are the guards below, the
+  agent asking instead of acting (S4), Claude's own tap-only permission dialogs, and Stop.
+- Transport: HTTPS through Tailscale Serve, no cleartext in release builds. The app sends `Origin` of its configured
+  base URL on every POST, never sets a `Tailscale-*` header, and keeps only `vg_login`. No change to the Host,
+  identity, Origin, JSON-content-type or cookie rules, and no new route.
+- Guards. Any guard rejecting means nothing is sent, "Didn't catch that", listen again; three in a row pause the loop.
+  - G1 (phone, mandatory) energy gate: RMS above -55 dBFS and peak above -40 dBFS, before upload.
+    Measured on 2026-11-08 on the Nothing Phone (1) (speech RMS -48 / peak -29.5, room -58.6), on the speech span only.
+  - G2 (phone, mandatory) Silero gate: at least 0.8 s of voiced frames (prob >= 0.6), voiced at least 40% of the
+    utterance, before upload.
+  - G3 (phone, mandatory) transcript filter: empty or punctuation only; a known-hallucination phrase; fewer than 2
+    words (except answer mode); more than 4 words per voiced second; a phrase repeated 3+ times; only non-Latin
+    script when the phone's language is English.
+  - G4 (phone and server S2, mandatory) never send text starting with `/` or `!` by voice.
+  - G5 (server S2, mandatory) the server refuses voice prompts matching the noise list.
+  - G6 (speech service S3, pending the user) Whisper's own VAD and no-speech filter.
+  - G7 (server, mandatory, already there) the existing prompt refusals, unchanged.
+  - G8 (phone, mandatory) send only to the worktree current when the utterance started.
+  - G9 (server S4 and phone, mandatory) every voice prompt carries the clarify instruction; destructive steps are
+    asked with `ASK!:` and answered only by tap.
+  - G10 (phone, mandatory backstop) no unsend; a large Stop (`POST /api/stop`) and a headset long-press end the turn.
+- Clarification loop: a `summary` event with `ask: true` is played, then the mic reopens with no tap ("your turn"
+  earcon, 20 s no-speech timeout, one re-say, then paused with the question kept; nothing is ever sent on silence).
+  The answer is a new ordinary voice prompt; the agent has the earlier turn in context. Answer mode relaxes G3's
+  2-word minimum to one word from `yes`, `no`, `yeah`, `nope`, `cancel`, `stop`, `one`, `two`, `three`; "okay" is
+  refused everywhere.
+- Approval phrases (user's decision, relaxed 2026-11-09): a plain `ASK:` question (`ask: true`) is approved by a
+  plain yes, sure, go ahead or the like. A destructive or hard-to-undo step needs a whole utterance equal, once
+  normalised, to one of `yes go ahead`, `yes do it`, `yes please proceed`, `yes thats right`; `ASK!:` steps stay
+  tap only. The app never decides anything was approved; it sends the user's words, and the agent applies the rule
+  from its instruction (`ApprovalPhrase.approves` mirrors it for labels and tests only). G3's answer-mode word list
+  is unchanged, so a lone "sure" or "yep" is still dropped as "didn't catch that".
+- Tap-only confirmation: a `summary` event with `ask: "confirm"` (the agent wrote `ASK!:`, or the server upgraded an
+  `ASK:` with a destructive word) is played, then the mic stays off and the screen shows Yes and No. Yes sends
+  "yes, go ahead", No sends "no, do not do that", both as voice prompts with `"confirm": "tap"` (S5), so the agent
+  is told the answer came from a tap and was not misheard. A headset press only re-says it.
+- `needs-you` dialogs are answered by tap only in v1; the mic stays off while blocked.
+- S1 Refusal reasons. Every JSON error body raised by `/api/prompt`, `/api/keys`, `/api/stop`, `/api/restart` and
+  `/api/transcribe` carries `reason`, one of: `bad_text`, `not_listed`, `stopped`, `no_orchestrator`,
+  `pane_changed`, `not_settled` (with `status`), `not_blocked` (with `status`), `not_working` (with `status`),
+  `draft_present`, `screen_changed` (with `output`, `screen_token` as today), `repeat_window`, `action_running`,
+  `herdr_refused`, `herdr_timeout_maybe_sent`, `herdr_failed`, `already_running`, `voice_command`, `voice_noise`,
+  `speech_off`, `bad_audio_type`, `audio_empty`, `audio_too_large`, `transcribe_busy`, `transcribe_rate`,
+  `speech_failed`, and for restart only `restart_refused` (409) and `restart_failed` (502). Never holds prompt text,
+  paths or a service's words. `error` messages and statuses unchanged. The request guards before the route (401,
+  403, 411, 415 for JSON, a bad length or bad JSON, 413 for a JSON body) keep today's bodies with no `reason`; the
+  client goes by status there. A recording over the cap is 413 `audio_too_large` from the guard as well.
+- S2 Voice prompts. `POST /api/prompt` takes an optional `"voice": true`. Absent means false; `true` and `false` are
+  accepted; any other value (null, numbers, strings) is 400 `bad_text`. With it: text beginning with `/` or `!`
+  (after control characters and leading whitespace are removed) is refused (400, `voice_command`); text that,
+  lowercased, with every run of punctuation or whitespace made one space and trimmed, equals an entry of
+  `VOICE_NOISE_PHRASES` (`thank you`, `thanks for watching`, `thank you for watching`, `you`, `bye`, `okay`, `so`,
+  `please subscribe`, `subtitles by the amara org community`, `i m sorry`) is refused (422, `voice_noise`). Both are
+  checked before the session is looked up or locked, so nothing is read from Herdr. Without `voice` the rules are
+  unchanged. Near misses ("thank you, now run the tests") are sent.
+- S3 (speech service, sam-nix, pending the user) Whisper silence filter: `vad_filter=True`,
+  `condition_on_previous_text=False`; segments with `no_speech_prob > 0.6` and `avg_logprob < -1.0` dropped;
+  `{"text": ""}` when nothing is left. The gateway already answers that as empty text. Not in this folder.
+- S4 Clarify by voice (used only by prompts sent with `"voice": true`, so the page never sees it).
+  - `summary_instruction(nonce, voice=True)` puts a clarify clause before the existing text, so the line still ends
+    in the placeholder, the tag still appears exactly once, and it stays one line: "(Sent from my phone by voice, so
+    the words may be misheard. If the request is unclear, ambiguous, risky, or looks like a speech-recognition
+    mistake, do not act on it: change nothing and run nothing, and instead ask one short question, writing your
+    spoken line as ASK: followed by the question, ending with a question mark. If the question is whether to do
+    something destructive or hard to undo (deleting or overwriting files, branches or data, git push or force push,
+    reset or rebase that drops work, dropping or migrating a database, deploying, or anything that spends money),
+    write ASK!: instead of ASK:, even if the request itself was clear; such a step is confirmed by a tap on the
+    phone, never by voice. A spoken reply to an ASK: question approves the proposed step if it is a plain yes, sure,
+    go ahead or the like, unless the step is destructive or hard to undo: then it approves only if it is exactly one
+    of: yes go ahead, yes do it, yes please proceed, yes thats right (ignoring case and punctuation), and a bare yes,
+    yeah, sure or okay is not approval, so ask again with ASK!:. End your reply with one final line of at most two
+    plain sentences, written to be read aloud, with no code, paths or markdown, in exactly this form:
+    SPOKEN[nonce]: your spoken summary)" (approval sentence relaxed 2026-11-09). The phrase
+    list is built from `VOICE_APPROVAL_PHRASES`, so it reads in its normalised form. With `voice` false (typed
+    prompts, the page) the text is byte-identical to today.
+  - `PendingSend` gets `voice` (default false), set from the prompt's flag in `arm`.
+  - Pure `split_ask(text) -> (ask, text)` with `ask` one of `False`, `True`, `"confirm"`: if the cleaned spoken text
+    starts with `ASK!:` (case-insensitive, no space between `ASK` and `!`, surrounding spaces allowed) it returns
+    `("confirm", rest)`; else if it starts with `ASK:` it returns `(True, rest)`, upgraded to `"confirm"` when the
+    normalised question contains a whole word from `VOICE_DESTRUCTIVE_WORDS` (`delete`, `remove`, `rm`,
+    `overwrite`, `force`, `push`, `drop`, `reset`, `rebase`, `wipe`, `purge`, `truncate`, `deploy`, `publish`, `pay`,
+    `purchase`, `charge`), a fail-safe backstop (a false positive only costs a tap). In both cases the marker is
+    removed, the rest cut to `MAX_SPOKEN_CHARS - 1` at a word, and `?` appended if missing; an empty rest (or only
+    question marks) returns no spoken line, `(False, None)`, so the existing `check-screen` fallback applies.
+    Anything else returns `(False, text)` unchanged. Applied only for voice records; a typed prompt's spoken line is
+    never altered.
+  - Pure `normalise_phrase(text)`: lowercase; apostrophes (`'` and `’`) removed (`that's` -> `thats`); every other
+    run of characters that are not letters or digits becomes one space; trimmed. Used by the destructive-word check
+    and pinned by tests against `VOICE_APPROVAL_PHRASES` (every entry at least 3 words, already normalised).
+  - The event stays kind `summary` (the page's name-prefix rule, `/api/audio` keying and acknowledge are
+    unchanged); it gains `"ask": true` for a question or `"ask": "confirm"` for a tap-only confirmation. The field
+    is absent otherwise. The marker is never spoken; the question mark is.
+- S5 Tap confirmation (2026-11-09). `POST /api/prompt` takes an optional `"confirm"`; the only accepted value is
+  `"tap"`, anything else (null, other strings, other types) is 400 `bad_text`, checked before Herdr is read. Honoured
+  only with `"voice": true` (typed text with it is sent as today). With it, `summary_instruction(nonce, voice=True,
+  tap=True)` uses, instead of the clarify clause: "(Sent from my phone by a tap on the Yes or No button shown for
+  your last ASK!: or ASK: question, so this reply is certain and was not misheard: it is the user's explicit approval
+  or refusal of that step. Ask any new question with ASK: or ASK!: as before. End your reply ... SPOKEN[nonce]: your
+  spoken summary)". Nonce, record (`voice` true), voice text checks (S2) and `split_ask` are unchanged.
+- Unchanged for the web page: the Host, identity, Origin and JSON-content-type rules; the cookie name, flags and
+  lifetime; every route, query parameter and response field (S1 only adds `reason`, S4 only adds `ask`);
+  `GET /api/audio` semantics, 416 rule and engine fallback; the transcribe caps; event ids, kinds and acknowledge;
+  the page's "speech only fills the box" rule; CSP; `static/` untouched.
+
+Wire format for the Android client (final, as implemented)
+- Prompt request: `POST /api/prompt` `{"session": "wt-...", "text": "...", "voice": true}`; typed text sends
+  `"voice": false` or leaves it out. The Yes or No tap of a confirmation adds `"confirm": "tap"` (S5). Success is unchanged: `{"ok": true, "draft": "clear"|"present"|"unknown"}`.
+- Error body: `{"error": "<message for people>", "reason": "<code>", ...}`. Extra fields by reason: `status` (the
+  orchestrator status string, e.g. `"working"`) with `not_settled`, `not_blocked`, `not_working`; `output` and
+  `screen_token` with `screen_changed`; `retry_after` (integer seconds, also the `Retry-After` header) with
+  `transcribe_busy` (2) and `transcribe_rate`. Statuses by reason: 400 `bad_text`, `voice_command`, `audio_empty`;
+  404 `not_listed`, `speech_off`; 409 `stopped`, `no_orchestrator`, `pane_changed`, `not_settled`, `not_blocked`,
+  `not_working`, `draft_present`, `screen_changed`, `repeat_window`, `action_running`, `herdr_refused`,
+  `already_running`, `restart_refused`; 413 `audio_too_large`; 415 `bad_audio_type`; 422 `voice_noise`; 429
+  `transcribe_busy`, `transcribe_rate`; 502 `herdr_timeout_maybe_sent`, `herdr_failed`, `speech_failed`,
+  `restart_failed`. A body with no `reason` comes from a request guard (401 log in again, 403, 411, 415, 400, 413).
+- Event (in `events` of `GET /api/session` and `GET /api/sessions`): `{"id", "kind", "session", "worktree", "text"}`
+  as today, plus `"ask": true` or `"ask": "confirm"` only on a `summary` from a voice prompt whose spoken line was
+  a question. No `ask` key otherwise; any other value must be treated as `"confirm"`.
+
+Orchestrator launch and new worktree from the app (approved 2026-11-08; plan in
+~/.claude/plans/android-new-worktree.md; adds to "New worktree from the phone" and "Base branch for new worktrees",
+which still hold unless said here). This part is the server and `wt`; the Android client is a later task.
+- Create answer gains `launch`. The gateway reads the stdout of `wt new` (already captured to a file) and takes the
+  **last** line that fully matches
+  `wt-launch: model=([a-z0-9.-]{1,64}|default) effort=(low|medium|high|xhigh|max|default) playbook=(yes|no) settings=(yes|no) trust=(written|already|skipped|off)`
+  (single spaces, no leading or trailing space, no `\r`). It answers
+  `"launch": {"model": "<id>"|"default", "effort": "<level>"|"default", "playbook": bool, "settings": bool, "trust": "written"|"already"|"skipped"|"off"}`,
+  or `"launch": null` when no line matches (an older `wt`, no orchestrator config, `wt-launch: restored`, garbage, or
+  a line on stderr only). Nothing else from wt's output is passed on, and a bad line is never an error. The page
+  ignores the key; `static/` is unchanged.
+- Worktree refusals gain `reason` (S1 style, beside today's `error`; messages and statuses unchanged; the request
+  guards before the route keep their bodies with no `reason`). Every `RequestRejected` raised by plan, re-plan or
+  create carries one:
+  400 `bad_query`, `bad_repo` (repo id not usable), `bad_plan` (plan id missing or malformed), `bad_base` (typed base
+  empty or too long);
+  404 `repo_gone` (the tapped repo is not listed), `plan_gone` (no such plan, or already used);
+  409 `worktrees_off`, `interpreter_off`, `no_repos`, `plan_busy`, `plan_expired`, `create_busy`, `repo_unlisted`
+  (the planned repo left the list), `not_main_checkout`, `branch_checked_out`, `no_commit` (an existing branch with
+  no commit), `target_exists`, `repo_changed` ("changed since the plan"), `branch_unusable`, `base_unusable`,
+  `not_ready` (no base picked), `wt_missing` (no wt command), `wt_unrunnable` (wt could not be started);
+  502 `git_failed` (local git timed out, could not run, or could not list), `fetch_failed` (with `offline` when there
+  is a local copy, exactly as today), `wt_failed`, `wt_timeout`, `no_folder`, `no_session_name`.
+  Restart's own reasons (`restart_refused`, `restart_failed`) are unchanged: the wt reasons are set only on the
+  create path.
+- No change to the child environment: `WT_*` names pass through, `CLAUDE*`, `HERDR_*` and `VOICE_GATEWAY_*` are still
+  dropped. No new route, no session name in the plan answer.
+- `wt` (Mac only, not in this folder; user-approved edit of `~/.local/bin/wt`, backup at
+  `~/.local/bin/wt.pre-orchestrator`). Simplified 2026-11-08 at the user's request: the config file, playbook, guard
+  hook, `--settings`, `--effort` and the `wt-launch:` line were removed. Only two differences from the backup remain:
+  - A brand-new orchestrator runs `claude --model "${WT_ORCHESTRATOR_MODEL-claude-opus-5-5}"`. Unset: Opus 5.5. Set
+    to another name: that model. Set but empty: plain `claude` (opt-out). A value not matching
+    `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`: plain `claude` and one `wt:` warning on stderr; `wt new` never fails because
+    of it. A restored session types nothing. The user directs agents themselves.
+  - Pre-trust: `wt new` (only) runs `~/.local/share/wt/pretrust.py <path>` after `git worktree add`, before the
+    session starts; its word is discarded and its result never fails `wt new`.
+  - `wt` prints no `wt-launch:` line, so `launch` in the create answer stays optional and is normally `null`.
+- Pre-trust (`pretrust.py <path>`): sets `projects["<realpath>"].hasTrustDialogAccepted = true` in `$HOME/.claude.json`
+  for that one path. The path must be a directory exactly two levels below `realpath($HOME/worktrees)` and a linked
+  git worktree, else `refused` (exit 2). `$HOME/.claude.json` must exist and be a regular file owned by the user,
+  else `skipped` (never created). Lock: `mkdir $HOME/.claude.json.lock`, retried for up to 5 s, else `skipped`; a
+  lock it did not make is never removed. Already trusted (that path or its main checkout): `already`. Otherwise only
+  that key is added, via a private temp file, atomic replace and re-read; a failure leaves the original. Never prints
+  a value from the file. No backup copy is made.
+
 ## Current
 
-Nothing in progress.
+- [x] A0 Spec: the "Android app" section above (auto-send with no cancel window or confirm, guards, the clarification
+      loop, the approval-phrase rule, tap-only confirmation for `ASK!:`, S1-S4) and these tasks.
+- [x] A1 Server tests first with the fake runner, FakeLocal and the HTTP server: S1 reasons (one test per refusal
+      path of prompt, keys, stop, restart, transcribe, plus HTTP bodies and guards keeping theirs), S2 (`voice`
+      true/false/invalid, `/`, `!`, each noise phrase and how Whisper writes it, near misses that must pass, nothing
+      read from Herdr) and S4 (exact instruction text, typed text byte-identical, `normalise_phrase`, approval list,
+      destructive words, `split_ask`, wrapped echo, events with `ask`, typed prompts unchanged). 64 of 73 new tests
+      failed first on 3.14 (two of them also had a test bug, fixed: a helper slice and a keyword clash).
+- [x] A2 Server: S1, S2 and S4 implemented in `gateway.py`; `static/` unchanged. 767 green on Python 3.14 and the
+      macOS system 3.9 (694 before plus 73 new).
+- [ ] A3 Android skeleton: wrapper, `settings.gradle.kts`, catalog with pinned versions, `:core` and `:app` build,
+      empty Compose screen installs over adb. Not started.
+      - [x] Fixtures generated from the gateway's real views: `android/tools/make_fixtures.py` drives the real
+            handler in-process with the fake runner (no server, port, Herdr or data/), 55 files in
+            `android/core/src/test/resources/fixtures/`, the same on 3.14 and 3.9.
+- [x] A4 `:core` models and `HttpGatewayApi` with MockWebServer tests first. 43 of 50 new tests failed first (the
+      7 that passed check fixture coverage only); 50 green.
+- [x] A5 Pure speech helpers (`Wav`, `UtteranceDetector`, `TranscriptGuard`, `ApprovalPhrase`, `RateBudget`,
+      `EngineChain`), tests first. `RateBudget` and `EngineChain` last: 20 of 25 new tests failed first; 25 green.
+- [x] A6 `VoiceLoop.step` with the transition table as the test spec first (`core/loop`: 15 phases, 31 inputs,
+      20 effects, 7 timers). 104 of 122 new tests failed first (the 18 that passed assert "this input changes
+      nothing" or sample coverage); 124 green, including random walks of 80,000 steps over the mic, timer, poll and
+      no-auto-send rules.
+- [ ] A7 `SecretStore` and `PersistentCookieJar`, then Login and Settings screens. Not started.
+- [ ] A8 Audio: `AudioRecordCapture` with Silero, `AudioFocusGate`. Not started.
+- [x] A9 Playback: `ExoSpeaker`, `PhoneTtsSpeaker`, `ChainSpeaker`. Not started.
+- [x] A10 `LoopController`, `Poller`, `VoiceLoopService` with JVM scenario tests against a fake gateway. Not started.
+- [x] A11 UI: `VoiceScreen` states, picker, details sheet, Compose UI tests. Not started.
+- [x] W0 Spec: "Orchestrator launch and new worktree from the app" above (server and `wt` part).
+- [x] W1 `wt` tests first: `test_wt.py` (48 tests; temp HOME under /tmp, fake herdr, fake claude and zed that
+      record any run, real git on scratch repos, the real `~/.claude.json` proven untouched with an audit hook).
+      Before the change every test failed except the 3 that pin the default behaviour (no config, byte for byte
+      against `wt.pre-orchestrator`, restored with no config), which passed as they must; the 4 installed-file
+      tests skipped.
+- [x] W2 `~/.local/bin/wt`, `~/.local/share/wt/orchestrator.py`, `~/.local/share/wt/pretrust.py`, the guard and
+      settings in `~/.config/wt/` (0700 folder, 0600 files). 48 green on Python 3.14 and the macOS system 3.9.
+      `~/.config/wt/orchestrator.conf` not created: the feature is off.
+- [x] W3 Gateway tests first (`launch` parsing and the create answer, every worktree `reason`, a source scan that
+      every `RequestRejected` in `NewWorktrees` names a reason, HTTP bodies): 29 of 34 (33 new, 1 updated for
+      `launch: null`) failed first on 3.14.
+- [x] W4 Gateway: `parse_wt_launch`, `launch` in the create answer, reasons on every worktree refusal, create-path
+      wt reasons via `_wt_for_create` (restart's reasons untouched). 798 green on Python 3.14 and the macOS
+      system 3.9; `static/` unchanged.
+- [x] W8 Examples in `examples/`: the playbook as reviewed, `wt-orchestrator.conf.example`, `orchestrator-guard.py`,
+      `orchestrator-settings.example.json`; a test checks them for personal names and hostnames.
+- [x] W5 Fixtures: `make_fixtures.py` `worktrees()` drives the real handler on scratch git (local bare origin, fixed
+      commit dates, repo ids hashed below the scratch home): 27 new files (82 in all), identical on 3.14 and 3.9.
+- [x] W6 Android `:core` tests first (models, refusals with `offline`, HTTP with plan 90 s / create 300 s, `CardPhrase`,
+      `CardSpeech`, the flow's rows in `VoiceLoopWorktreeTest`, property walks, mapper): 73 failed first; then
+      `model/Worktrees.kt`, `worktree/` (flow, rules, phrases, speech), `Phase.NewWorktree`, mapper. 427 green.
+- [x] W7 Android `:app`: scenario tests first (9 failed first), then `LoopController` effects, `AppActions`,
+      `NewWorktreeCard`, the "New worktree" button and picker entry, previews; Compose tests written and compiled,
+      not run (no device). 200 green; debug APK built.
+- [x] W9 Reverted W2/W8 to the simplified `wt` (model default Opus 5.5, env override, empty opt-out, pre-trust kept);
+      guard, playbook, settings, `orchestrator.py` and `examples/` deleted. `test_wt.py` trimmed to 25 tests: 7
+      failed first against the old wt, 25 green on Python 3.14 and the macOS system 3.9.
+- [x] W10 Android mic permission: one gate (`core/permission`, `MicPermissionGate`) for every mic-opening action
+      (asks, runs the remembered action after Allow, persistent "Microphone permission is needed to listen" with
+      Open settings when denied for good); a mic failure keeps the new-worktree flow with an on-screen message; the
+      service no longer sends AppStopped when it never reached the foreground (that discarded the flow). Tests first.
+- [x] W11 No input after Create (user, 2026-11-08): `HANDOFF_FIRST_PROMPT` false; Create switches to the new
+      worktree and stops there idle; no prompt, no Held, no hand-off wait or 120 s limit (hand-off kept behind the
+      flag, tested both ways). Tests first.
+- [x] C1 Tap confirmation is not a voice command (bug, 2026-11-09): Yes and No of AwaitingTap went out with the
+      misheard-voice clause, so the agent refused them. Server S5 (`"confirm": "tap"`, own instruction, validated)
+      and app (`Effect.Send.confirmTap`, kept through retry, Held and Send now; `GatewayApi.prompt(confirmTap)`;
+      fixtures `prompt_ok_tap`, `prompt_bad_confirm` from `make_fixtures.py`, same on 3.14 and 3.9, other fixtures
+      unchanged). Tests first (red, then green); mic still off in AwaitingTap.
+- [x] C2 Relaxed approval for plain `ASK:` (2026-11-09): strict phrases only for destructive steps; plain yes for
+      plain questions. Gateway instruction text, `ApprovalPhrase.PLAIN` and `approves(text, AskKind)`, mirror test
+      on the server text. Tests first.
+- [ ] C3 On the phone: an `ASK!:` Yes tap is acted on, and a plain `ASK:` answered "yes" is acted on (pending the
+      user; not verified on a device).
+
+## wt prune (2026-11-08)
+
+Spec. `wt prune [--dry-run] [--days N]` (Mac only, user-approved edit of `~/.local/bin/wt`, backup at
+`~/.local/bin/wt.pre-prune`; helper `~/.local/share/wt/prune.py`, run with `python3 -I`). Deletes stale Herdr session
+RECORDS only; never a worktree, folder or branch.
+- Candidates: names `wt-[A-Za-z0-9._-]{0,61}` that `herdr session list` shows not running and that have no
+  `herdr session attach <name>` process (wt's `session_attached`). Other names are never passed to herdr.
+- Deleted when any holds, checked in this order: (a) folder missing: `workspaces[0].identity_cwd` of the saved
+  `session.json`, absolute, and stat says it does not exist; (b) idle more than N days (default 7, `--days` 1-3650):
+  idle age = now minus the newest mtime of the regular files directly in `~/.config/herdr/sessions/<name>/`
+  (herdr-server.log, herdr-client.log, session.json, any backups) and `<name>.server.log`; no such file = rule off;
+  (c) fully pushed: `git branch -r --contains HEAD` non-empty (read-only git, 10 s timeout per call, no fetch,
+  `--no-optional-locks`); no remote = not pushed. Uncommitted changes do not block; their count is shown.
+- Mutations (real run only): `herdr session delete <name>` after a fresh list shows it still stopped (else
+  skipped), removing `<name>.server.log`, one line per deleted record appended to `~/.local/state/wt/prune.log`
+  (dir 0700, file 0600; date, name, folder, branch, full sha), lock dir `~/.local/state/wt/prune.lock` (never
+  broken). `--dry-run` takes no lock, writes nothing and runs only `herdr session list`, ps and read-only git.
+- Report: one line per wt-* session (name, action, reason, branch, short sha, uncommitted count), then totals. No
+  paths, no file contents. Exit 0 ok, 1 error (lock held, herdr list failed, any delete failed; the rest still
+  run), 2 usage.
+
+- [x] P0 Spec (above).
+- [x] P1 Failing tests first in `test_wt.py` (fake herdr that fails on anything but `session list` and
+      `session delete <name>`, fake ps, git wrapper that logs subcommands, scratch repos with local bare remotes):
+      24 of 26 new tests failed first on 3.14 and 3.9 (the 2 that passed: usage exit 2, which old wt also gave,
+      and the diff against the backup, trivially true before the change).
+- [x] P2 `prune.py` (pure `decide` plus thin effects) and the `prune` case in wt. 51 green on Python 3.14 and the
+      macOS system 3.9.
+- [x] P3 Real `wt prune --dry-run` (2026-11-08, read-only, nothing created): 38 wt-* sessions, would delete 33
+      (4 folder missing, 19 idle, 10 fully pushed), kept 5 (3 running, 2 recent and not pushed / not git).
+- [ ] P4 The real `wt prune` is the user's to run.
+
+### wt prune --worktrees (2026-11-08)
+
+Spec. `wt prune --worktrees [--dry-run] [--days N]` (user-approved; backup `~/.local/bin/wt.pre-worktrees`). Runs the
+record pass above unchanged, then a folder pass in `~/.local/share/wt/prune_worktrees.py` (loaded by `prune.py` by
+path only when the flag is given, so `prune.py` itself keeps no worktree command). Without the flag nothing changes.
+- Candidates: every directory entry exactly at realpath(`~/worktrees`)/<repo>/<name>; plain files are ignored.
+- Removed only when ALL hold, else kept with the first failing reason, checked in this order: not a symlink; a
+  linked worktree (`.git` regular file starting `gitdir:`; a `.git` folder = "main checkout"); its main checkout
+  (dirname of commondir) is a normal repo; listed by `git -C <main> worktree list --porcelain`, not its first entry,
+  not locked, not prunable; no `.gitmodules` / gitdir `modules`; no rebase, merge, cherry-pick, revert or bisect in
+  progress; HEAD readable; no running and no attached Herdr session whose saved folder is the folder (or inside it)
+  or whose name is the one wt derives for it (any session name, not only wt-*); `git status --porcelain
+  --untracked-files=all` empty (dirty N files); every `--ignored=matching` path under a regenerable folder
+  (node_modules .next .nuxt dist build out target .gradle .turbo .cache coverage __pycache__ .venv venv .pytest_cache
+  .mypy_cache .dart_tool .angular), else "ignored outside safe list: <first name> (+N)"; a remote exists; HEAD in
+  `git branch -r --contains HEAD` (detached counts, reported); no process cwd inside it per one
+  `lsof -a -d cwd -Fn -w` (15 s timeout; lsof missing, failing or timing out = kept "in use (lsof unavailable)").
+  Git reads: `--no-optional-locks`, `core.fsmonitor=false`, `core.hooksPath=/dev/null`, no GIT_* env, timeouts.
+- Removal (real run, under the existing prune lock): re-gather and re-decide that one folder right before
+  (skip "changed since check" if anything differs: decision, HEAD or branch), then only
+  `git -C <main> worktree remove <path>` (never --force); on failure "failed: git worktree remove refused", exit 1,
+  continue. After a removal: wt-* records for that folder that a fresh list shows stopped are deleted as the record
+  rules do (`herdr session delete`, server log, record log line). Never branch delete, `worktree prune`, rm -rf,
+  `wt rm/down`, `session stop`, ~/.claude, or the ~/worktrees/<repo> parent.
+- Log: one tab-separated line per removal in `prune.log`: ISO date, `worktree`, path, main, branch, full sha,
+  `git -C <main> worktree add <path> <branch|sha>` (shell-quoted).
+- Report: second table WORKTREE (<repo>/<name>), ACTION (removed / would remove / kept / failed), REASON, BRANCH,
+  HEAD; totals. `--dry-run`: no lock, nothing created or removed.
+
+- [x] W0 Spec (above). Backups: `~/.local/bin/wt.pre-worktrees`, scratchpad copy of `prune.py`.
+- [x] W1 Failing tests first (real scratch worktrees under a temp HOME's ~/worktrees, git shim recording argv, fake
+      lsof): 33 of 34 new tests failed on 3.14 and 3.9 (the one passing: "without the flag nothing runs").
+- [x] W2 `prune_worktrees.py`, `--worktrees` in `prune.py`, help lines in wt. 85 green on 3.14 and 3.9.
+- [x] W3 Real `wt prune --worktrees --dry-run` (2026-11-08, read-only, nothing created): 28 folders, would remove 5,
+      kept 23 (12 ignored outside safe list, 5 dirty, 3 main checkout not found, 2 not a git folder).
+- [ ] W4 The real `wt prune --worktrees` is the user's to run.
 
 ## Not done, pending the user
+
+- [ ] Orchestrator launch live checks (scratch repo under a scratch root, local bare origin, at most 4 real prompts):
+      - [ ] L1 A new `wt new` session shows Opus 5.5 (`/model` in the orchestrator tab).
+      - [ ] L2 `WT_ORCHESTRATOR_MODEL= wt new ...` types plain `claude`.
+      - [ ] L3 Pre-trust: no trust dialog on the new worktree; `~/.claude.json` still 0600 and parses (keys only,
+            never values).
+      - [ ] L5 Restore: stop the scratch session, `wt attach`, then `/model` again. Record what Herdr kept.
+      - [ ] L7-L10 Phone flow, near misses, fetch failure, create time over Serve (after the Android task).
+      - [ ] Clean-up: `wt down` and `wt rm` per scratch worktree, scratch repos removed.
 
 - [ ] Local speech: start `~/voice-models/speech/start.sh` on the speech host; store its token on the Mac with
       `ssh <speech-host> cat ~/voice-models/speech/token | python3 gateway.py --set-speech-token`; restart the gateway on
       8766 with `VOICE_GATEWAY_SPEECH_URL=http://<speech-host-ip>:8790`. Then try Chatterbox and Local Whisper on the
       real phone: the phone's mic and speaker, Android Chrome's MediaRecorder type, the mic permission over the
       tailnet HTTPS page.
-- [ ] Decide on Whisper's habit of inventing text ("Thank you.") for a silent recording: seen live with silent input;
-      it only fills the box, but a VAD filter in stt_worker.py would make it empty. Not changed.
+- [ ] Headless Chrome check that the web page is unchanged with the new server (plan A2). Not run: no gateway was
+      started for this work. The tests pin typed prompts to today's exact instruction text.
+- [ ] Approve the Android app's server wording: S1 reasons, S2 noise list, and S4's instruction text in particular
+      (the action-type list, the approval phrases, `VOICE_DESTRUCTIVE_WORDS`).
+- [ ] Decide S3 (replaces "Whisper's habit of inventing text"): the Whisper silence filter in
+      `~/voice-models/speech/stt_worker.py` on sam-nix, only with the user's go-ahead. Until then G1-G5 carry the load.
+- [ ] A12 Live on the real phone over the tailnet (one scratch worktree, a small capped number of real prompts):
+      login over Serve, a full hands-free turn screen-off, silence and noise produce no send (zero `/api/prompt` in
+      the gateway log), a vague request ("fix it") gets a spoken question and the spoken answer completes the turn,
+      silence after a question pauses without a send, deleting a scratch file gets an `ASK!:` confirmation that keeps
+      the mic off until a Yes tap (count the agent's own `ASK!:` against the destructive-word upgrade), a lone "yes"
+      to an approval question gets the question again, tap-to-interrupt, a dialog answered by tap after the
+      look-at-phone cue, Chatterbox -> Deepgram -> phone voice fallback, gateway restart -> re-login, Tailscale off/on
+      mid-turn, battery over 30 minutes.
 - [ ] Set a real passcode: `python3 gateway.py --set-passcode`.
 - [ ] Restart the gateway on 8766 to pick up the streamed voice, the Flux default (flux-cole-en), no kept Deepgram
       connection and new worktrees (repos under ~/work and ~/personal, `claude -p` with claude-haiku-5-5). The page

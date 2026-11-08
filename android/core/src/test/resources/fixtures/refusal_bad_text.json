@@ -1,0 +1,8 @@
+{
+  "status": 400,
+  "headers": {},
+  "body": {
+    "error": "There is nothing to send.",
+    "reason": "bad_text"
+  }
+}

@@ -1,0 +1,60 @@
+{
+  "status": 200,
+  "headers": {},
+  "body": {
+    "other_url": null,
+    "attached": [
+      {
+        "name": "wt-api",
+        "state": "attached",
+        "agents": [
+          {
+            "name": "builder",
+            "kind": "claude",
+            "pane_label": "",
+            "status": "working",
+            "orchestrator": true
+          }
+        ]
+      }
+    ],
+    "running": [
+      {
+        "name": "wt-scratch",
+        "state": "running",
+        "agents": [
+          {
+            "name": "claude",
+            "kind": "claude",
+            "pane_label": "",
+            "status": "idle",
+            "orchestrator": true
+          }
+        ]
+      }
+    ],
+    "stopped": [
+      {
+        "name": "wt-old",
+        "state": "stopped",
+        "agents": []
+      }
+    ],
+    "events": [
+      {
+        "id": "0000000000000003",
+        "kind": "summary",
+        "session": "wt-scratch",
+        "worktree": "scratch",
+        "text": "It is two."
+      }
+    ],
+    "waiting": [],
+    "voice": "browser",
+    "voices": [],
+    "local": {
+      "configured": false,
+      "reason": "Local speech is not set up."
+    }
+  }
+}

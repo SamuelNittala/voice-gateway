@@ -1,0 +1,8 @@
+{
+  "status": 404,
+  "headers": {},
+  "body": {
+    "error": "Local Whisper is off. No speech token is stored.",
+    "reason": "speech_off"
+  }
+}

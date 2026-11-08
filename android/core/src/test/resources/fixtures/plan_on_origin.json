@@ -1,0 +1,36 @@
+{
+  "status": 200,
+  "headers": {},
+  "body": {
+    "kind": "plan",
+    "plan_id": "0000000000000000000000000000004c",
+    "repo": {
+      "id": "85dfc701aea8",
+      "name": "web-app",
+      "where": "code"
+    },
+    "branch": "fix/login-timeout",
+    "mode": "new",
+    "ready": true,
+    "base": {
+      "applies": true,
+      "name": "production-4.6.4",
+      "ref": "origin/production-4.6.4",
+      "how": "named",
+      "sha": "7b2e552",
+      "subject": null,
+      "committed_at": null,
+      "fetched_at": null,
+      "local": false,
+      "said": "production 4.6.4",
+      "message": "",
+      "choices": [
+        "main",
+        "develop",
+        "uat"
+      ]
+    },
+    "path": "~/worktrees/web-app/fix-login-timeout",
+    "expires_in": 300
+  }
+}

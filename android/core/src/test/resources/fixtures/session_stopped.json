@@ -1,0 +1,28 @@
+{
+  "status": 200,
+  "headers": {},
+  "body": {
+    "name": "wt-scratch",
+    "state": "stopped",
+    "agents": [],
+    "orchestrator": null,
+    "problem": "",
+    "output": "",
+    "screen_token": null,
+    "draft": "unknown",
+    "actions": {
+      "prompt": false,
+      "keys": [],
+      "stop": false,
+      "restart": true
+    },
+    "events": [],
+    "waiting": [],
+    "voice": "browser",
+    "voices": [],
+    "local": {
+      "configured": false,
+      "reason": "Local speech is not set up."
+    }
+  }
+}

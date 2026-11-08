@@ -1,0 +1,7 @@
+{
+  "status": 415,
+  "headers": {},
+  "body": {
+    "error": "content type must be application/json"
+  }
+}

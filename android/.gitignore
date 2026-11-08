@@ -1,0 +1,21 @@
+# Build output and caches
+build/
+.gradle/
+.kotlin/
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+
+# Machine-specific settings (sdk.dir, optional gateway.url): never committed
+local.properties
+
+# Signing keys: never committed
+*.keystore
+*.jks
+
+# IDE
+.idea/
+*.iml
+.DS_Store

@@ -1,0 +1,58 @@
+{
+  "status": 200,
+  "headers": {},
+  "body": {
+    "name": "wt-scratch",
+    "state": "running",
+    "agents": [
+      {
+        "name": "claude",
+        "kind": "claude",
+        "pane_label": "",
+        "status": "blocked",
+        "orchestrator": true
+      }
+    ],
+    "orchestrator": {
+      "name": "claude",
+      "kind": "claude",
+      "status": "blocked",
+      "pane_label": ""
+    },
+    "problem": "",
+    "output": "visible screen",
+    "screen_token": "1c0711a57b116c0fd3ce7e8de232dfad",
+    "draft": "unknown",
+    "actions": {
+      "prompt": false,
+      "keys": [
+        "1",
+        "2",
+        "up",
+        "down",
+        "enter",
+        "esc"
+      ],
+      "stop": false,
+      "restart": false
+    },
+    "events": [
+      {
+        "id": "000000000000000e",
+        "kind": "needs-you",
+        "session": "wt-scratch",
+        "worktree": "scratch",
+        "text": "scratch needs you"
+      }
+    ],
+    "waiting": [
+      "wt-scratch"
+    ],
+    "voice": "browser",
+    "voices": [],
+    "local": {
+      "configured": false,
+      "reason": "Local speech is not set up."
+    }
+  }
+}

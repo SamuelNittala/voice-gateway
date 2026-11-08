@@ -1,0 +1,8 @@
+{
+  "status": 404,
+  "headers": {},
+  "body": {
+    "error": "No such worktree session.",
+    "reason": "not_listed"
+  }
+}

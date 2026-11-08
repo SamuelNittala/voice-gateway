@@ -1,0 +1,8 @@
+{
+  "status": 502,
+  "headers": {},
+  "body": {
+    "error": "Herdr failed: something.",
+    "reason": "herdr_failed"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "status": 502,
+  "headers": {},
+  "body": {
+    "error": "Local Whisper is not available (HTTP 500).",
+    "reason": "speech_failed"
+  }
+}

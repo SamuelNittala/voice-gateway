@@ -1,0 +1,8 @@
+{
+  "status": 400,
+  "headers": {},
+  "body": {
+    "error": "Say or type a base branch, at most 100 characters.",
+    "reason": "bad_base"
+  }
+}

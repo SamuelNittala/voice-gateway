@@ -1,0 +1,9 @@
+{
+  "status": 200,
+  "headers": {
+    "Set-Cookie": "vg_login=fixture-cookie-0001; Path=/; Max-Age=604800; HttpOnly; SameSite=Strict; Secure"
+  },
+  "body": {
+    "ok": true
+  }
+}

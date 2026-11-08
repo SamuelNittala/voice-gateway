@@ -1,0 +1,8 @@
+{
+  "status": 409,
+  "headers": {},
+  "body": {
+    "error": "Herdr refused: agent_blocked.",
+    "reason": "herdr_refused"
+  }
+}

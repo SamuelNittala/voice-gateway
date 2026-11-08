@@ -1,0 +1,8 @@
+{
+  "status": 400,
+  "headers": {},
+  "body": {
+    "error": "Say or type which repo, and what the worktree is for.",
+    "reason": "bad_query"
+  }
+}

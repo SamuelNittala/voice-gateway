@@ -1,0 +1,8 @@
+{
+  "status": 400,
+  "headers": {},
+  "body": {
+    "error": "Commands starting with / or ! are not sent by voice.",
+    "reason": "voice_command"
+  }
+}

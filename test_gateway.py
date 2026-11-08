@@ -1,5 +1,6 @@
 """Unit tests. A fake runner stands in for herdr, wt, ps and tailscale. Fixtures follow real Herdr 0.9.1 output."""
 import hashlib
+import inspect
 import http.client
 import http.server
 import io
@@ -127,6 +128,8 @@ class FakeRunner:
         self.wt_new_result = None  # What `wt new` answers instead of making the worktree, if set.
         self.on_wt_new = None
         self.new_sessions_listed = True  # Whether a session made by `wt new` shows up in `herdr session list`.
+        self.wt_new_stdout = ""  # Extra lines the fake `wt new` prints on stdout after its own, on success.
+        self.wt_new_stderr = ""  # What the fake `wt new` prints on stderr, on success.
         self.git_fail = {}  # git verb -> Res, or an exception to raise, instead of running real git.
         self.lock = threading.Lock()
 
@@ -234,7 +237,7 @@ class FakeRunner:
         self.wt_names[str(path)] = name
         if self.new_sessions_listed:
             self.sessions[name] = FakeSession()
-        return Res(0, f"Herdr session {name} started\n{path}\n")
+        return Res(0, f"Herdr session {name} started\n{self.wt_new_stdout}{path}\n", self.wt_new_stderr)
 
     def _herdr(self, argv):
         if argv[1:] == ["session", "list", "--json"]:
@@ -4989,7 +4992,8 @@ class WorktreeCreateTests(WorktreeCase):
         self.assertEqual(answer, {"ok": True, "session": name, "listed": True,
                                   "path": "~/worktrees/investor-agent/fix-streaming-timeout",
                                   "base": {"ref": "origin/main", "sha": sha, "subject": "first commit",
-                                           "fetched": True, "moved": False, "planned_sha": sha}})
+                                           "fetched": True, "moved": False, "planned_sha": sha},
+                                  "launch": None})
         [call] = self.runner.wt_calls("new")
         self.assertEqual(call["argv"], ["wt", "new", BRANCH, "--base", "refs/remotes/origin/main"])
         self.assertEqual(call["cwd"], str(self.repo))
@@ -5514,6 +5518,280 @@ class HttpWorktreeTests(HttpCase):
         status, _, body, _ = self.post("/api/worktree/create", {"plan_id": offline["plan_id"]})
         self.assertEqual(status, 200, body)
         self.assertFalse(json.loads(body)["base"]["fetched"])
+
+    def test_the_reason_is_in_the_body(self):
+        self.log_in()
+        status, _, body, _ = self.post("/api/worktree/create", {"plan_id": "0" * 32})
+        self.assertEqual((status, json.loads(body)), (404, {"error": "No such plan. Plan again.",
+                                                            "reason": "plan_gone"}))
+        status, _, body, _ = self.post("/api/worktree/plan", {"query": ""})
+        self.assertEqual((status, json.loads(body)["reason"]), (400, "bad_query"))
+
+    def test_the_launch_is_in_the_body(self):
+        self.log_in()
+        self.runner.wt_new_stdout = LAUNCH_LINE + "\n"
+        plan = json.loads(self.post("/api/worktree/plan", {"query": QUERY})[2])
+        status, _, body, _ = self.post("/api/worktree/create", {"plan_id": plan["plan_id"]})
+        self.assertEqual((status, json.loads(body)["launch"]), (200, LAUNCH))
+
+
+# ---------------------------------------------------------------- new worktree: launch line and refusal reasons
+
+LAUNCH_LINE = "wt-launch: model=claude-opus-5-5 effort=high playbook=yes settings=no trust=written"
+LAUNCH = {"model": "claude-opus-5-5", "effort": "high", "playbook": True, "settings": False, "trust": "written"}
+
+
+class LaunchLineTests(unittest.TestCase):
+    def test_a_full_line(self):
+        self.assertEqual(g.parse_wt_launch(f"Herdr session x started\n{LAUNCH_LINE}\n/tmp/x\n"), LAUNCH)
+
+    def test_defaults_and_every_value(self):
+        self.assertEqual(g.parse_wt_launch("wt-launch: model=default effort=default playbook=no settings=no trust=off"),
+                         {"model": "default", "effort": "default", "playbook": False, "settings": False,
+                          "trust": "off"})
+        for effort in ("low", "medium", "high", "xhigh", "max"):
+            for trust in ("written", "already", "skipped", "off"):
+                line = f"wt-launch: model=m.1-x effort={effort} playbook=no settings=yes trust={trust}"
+                self.assertEqual(g.parse_wt_launch(line),
+                                 {"model": "m.1-x", "effort": effort, "playbook": False, "settings": True,
+                                  "trust": trust})
+
+    def test_anything_else_is_no_launch_and_never_an_error(self):
+        bad = [None, 5, "", "\n\n", "wt-launch: restored", LAUNCH_LINE + " ", " " + LAUNCH_LINE, LAUNCH_LINE + "\r",
+               LAUNCH_LINE.replace(" effort", "  effort"), LAUNCH_LINE.replace("claude-opus-5-5", "Claude-Opus"),
+               LAUNCH_LINE.replace("claude-opus-5-5", "x" * 65), LAUNCH_LINE.replace("claude-opus-5-5", "a b"),
+               LAUNCH_LINE.replace("claude-opus-5-5", ""), LAUNCH_LINE.replace("high", "huge"),
+               LAUNCH_LINE.replace("playbook=yes", "playbook=true"), LAUNCH_LINE.replace("written", "done"),
+               LAUNCH_LINE.replace(" settings=no", ""), LAUNCH_LINE + " extra=1", "x" + LAUNCH_LINE,
+               LAUNCH_LINE.replace("wt-launch:", "wt-launch"), LAUNCH_LINE.replace("model=", "model=claude/x")]
+        for text in bad:
+            self.assertIsNone(g.parse_wt_launch(text), text)
+        self.assertEqual(g.parse_wt_launch("x" * 65 + "\n" + LAUNCH_LINE + "\r\nmore"), None)
+
+    def test_the_last_matching_line_wins(self):
+        other = LAUNCH_LINE.replace("trust=written", "trust=already")
+        self.assertEqual(g.parse_wt_launch(f"{LAUNCH_LINE}\n{other}\n")["trust"], "already")
+        self.assertEqual(g.parse_wt_launch(f"{LAUNCH_LINE}\n{other} garbage\n")["trust"], "written")
+        self.assertIsNone(g.parse_wt_launch(f"{LAUNCH_LINE} x\nwt-launch: restored\n"))
+
+    def test_only_the_listed_fields_come_back(self):
+        self.assertEqual(set(g.parse_wt_launch(LAUNCH_LINE)), {"model", "effort", "playbook", "settings", "trust"})
+
+
+class WorktreeLaunchTests(WorktreeCase):
+    def create(self):
+        return self.app.worktree_create({"plan_id": self.plan()["plan_id"]})
+
+    def test_the_create_answer_carries_the_launch(self):
+        self.runner.wt_new_stdout = LAUNCH_LINE + "\n"
+        answer = self.create()
+        self.assertEqual(answer["launch"], LAUNCH)
+        self.assertEqual(set(answer), {"ok", "session", "listed", "path", "base", "launch"})
+
+    def test_no_line_is_null(self):
+        self.assertIsNone(self.create()["launch"])
+
+    def test_a_restored_session_or_garbage_is_null(self):
+        for stdout in ("wt-launch: restored\n", LAUNCH_LINE + "  \n", "wt-launch: model=$(x) effort=high\n"):
+            self.runner.wt_new_stdout = stdout
+            self.interpreter.answer = {"repo_id": g.repo_id_of(self.repo), "branch": f"b{len(self.runner.calls)}"}
+            answer = self.create()
+            self.assertTrue(answer["ok"])
+            self.assertIsNone(answer["launch"], stdout)
+
+    def test_a_line_on_stderr_only_is_ignored(self):
+        self.runner.wt_new_stderr = LAUNCH_LINE + "\n"
+        self.assertIsNone(self.create()["launch"])
+
+    def test_two_lines_the_last_wins(self):
+        self.runner.wt_new_stdout = LAUNCH_LINE + "\n" + LAUNCH_LINE.replace("high", "max") + "\n"
+        self.assertEqual(self.create()["launch"]["effort"], "max")
+
+    def test_nothing_else_from_wt_is_passed_on(self):
+        self.runner.wt_new_stdout = "secret words from wt\n" + LAUNCH_LINE + "\n"
+        self.assertNotIn("secret", json.dumps(self.create()))
+
+    def test_the_child_environment_rules_are_unchanged(self):
+        env = {"WT_ORCHESTRATOR_MODEL": "m", "WT_PRETRUST": "1", "WT_EDITOR": "none", "CLAUDE_CODE_X": "1",
+               "CLAUDECODE": "1", "HERDR_SESSION": "s", "VOICE_GATEWAY_REPO_ROOTS": "/x", "PATH": "/bin"}
+        self.assertEqual(g.child_env(env), {"WT_ORCHESTRATOR_MODEL": "m", "WT_PRETRUST": "1", "WT_EDITOR": "none",
+                                            "PATH": "/bin"})
+
+
+class WorktreeReasonTests(WorktreeCase):
+    """Every worktree refusal carries a fixed reason; messages and statuses as before."""
+    def reason(self, status, fn, *args):
+        with self.assertRaises(g.RequestRejected) as caught:
+            fn(*args)
+        refused = caught.exception
+        self.assertEqual(refused.status, status, refused.message)
+        self.assertTrue(refused.message)
+        return refused.extra.get("reason")
+
+    def create(self, plan_id):
+        return self.app.worktree_create({"plan_id": plan_id})
+
+    def replan(self, plan_id, base):
+        return self.app.worktree_plan({"plan_id": plan_id, "base": base})
+
+    def test_off(self):
+        self.app = self.make(config={"repo_roots": ()})
+        self.assertEqual(self.reason(409, self.plan), "worktrees_off")
+        self.assertEqual(self.reason(409, self.create, "0" * 32), "worktrees_off")
+
+    def test_interpreter_off(self):
+        self.app = self.make(interpreter=g.NotConfiguredInterpreter())
+        self.assertEqual(self.reason(409, self.plan), "interpreter_off")
+        self.app = self.make()
+        self.interpreter.answer = g.InterpreterNotConfigured("x")
+        self.assertEqual(self.reason(409, self.plan), "interpreter_off")
+
+    def test_bad_query_repo_and_gone_repo(self):
+        self.assertEqual(self.reason(400, self.app.worktree_plan, {"query": None}), "bad_query")
+        self.assertEqual(self.reason(400, self.app.worktree_plan, {"query": "x" * (g.MAX_QUERY_CHARS + 1)}),
+                         "bad_query")
+        self.assertEqual(self.reason(400, lambda: self.plan(repo_id="../x")), "bad_repo")
+        self.assertEqual(self.reason(404, lambda: self.plan(repo_id="000000000000")), "repo_gone")
+
+    def test_no_repos(self):
+        empty = self.home / "empty"
+        empty.mkdir()
+        self.app = self.make(config={"repo_roots": (str(empty),)})
+        self.assertEqual(self.reason(409, self.plan), "no_repos")
+
+    def test_plan_busy(self):
+        self.interpreter.gate = threading.Event()
+        with g.ThreadPoolExecutor(max_workers=1) as pool:
+            first = pool.submit(self.plan)
+            self.assertTrue(wait_for(lambda: self.interpreter.calls))
+            self.assertEqual(self.reason(409, self.plan), "plan_busy")
+            self.interpreter.gate.set()
+            first.result(5)
+
+    def test_plan_ids_and_bases(self):
+        plan_id = self.plan()["plan_id"]
+        for bad in (None, 5, "", "../x"):
+            self.assertEqual(self.reason(400, self.replan, bad, "main"), "bad_plan")
+            self.assertEqual(self.reason(400, self.create, bad), "bad_plan")
+        for bad in ("", None, "x" * (g.MAX_BRANCH_CHARS + 1)):
+            self.assertEqual(self.reason(400, self.replan, plan_id, bad), "bad_base")
+        self.assertEqual(self.reason(404, self.replan, "0" * 32, "main"), "plan_gone")
+        self.assertEqual(self.reason(404, self.create, "0" * 32), "plan_gone")
+        self.clock.t += g.PLAN_TTL_SECONDS + 1
+        self.assertEqual(self.reason(409, self.replan, plan_id, "main"), "plan_expired")
+        self.assertEqual(self.reason(409, self.create, plan_id), "plan_expired")
+        self.assertEqual(self.reason(404, self.create, plan_id), "plan_gone")  # Used, even though it failed.
+
+    def test_create_busy(self):
+        first = self.plan()["plan_id"]
+        self.interpreter.answer = {"repo_id": g.repo_id_of(self.repo), "branch": "other-work"}
+        second = self.plan("other")["plan_id"]
+        gate, entered = threading.Event(), threading.Event()
+        self.runner.on_wt_new = lambda: (entered.set(), gate.wait(10))
+        with g.ThreadPoolExecutor(max_workers=1) as pool:
+            running = pool.submit(self.create, first)
+            self.assertTrue(entered.wait(5))
+            self.assertEqual(self.reason(409, self.create, second), "create_busy")
+            gate.set()
+            running.result(10)
+
+    def test_repo_unlisted(self):
+        plan_id = self.plan()["plan_id"]
+        again = self.plan()["plan_id"]
+        shutil.rmtree(self.repo)
+        self.assertEqual(self.reason(409, self.create, plan_id), "repo_unlisted")
+        self.assertEqual(self.reason(409, self.replan, again, "main"), "repo_unlisted")
+
+    def test_checkout_refusals(self):
+        self.target().mkdir(parents=True)
+        self.assertEqual(self.reason(409, self.plan), "target_exists")
+        shutil.rmtree(self.target())
+        plan_id = self.plan()["plan_id"]
+        self.target().mkdir(parents=True)
+        self.assertEqual(self.reason(409, self.create, plan_id), "target_exists")
+        shutil.rmtree(self.target())
+        self.interpreter.answer = {"repo_id": g.repo_id_of(self.repo), "branch": "main"}
+        self.assertEqual(self.reason(409, self.plan), "branch_checked_out")
+        self.interpreter.answer = {"repo_id": g.repo_id_of(self.repo), "branch": BRANCH}
+        self.runner.git_fail["rev-parse"] = Res(128, "", "fatal")
+        self.assertEqual(self.reason(409, self.plan), "not_main_checkout")
+        del self.runner.git_fail["rev-parse"]
+        run_git(["-C", str(self.repo), "branch", BRANCH])
+        self.runner.git_fail["log"] = Res(128, "", "fatal")
+        self.assertEqual(self.reason(409, self.plan), "no_commit")
+
+    def test_git_failed(self):
+        for verb, outcome in (("show-ref", subprocess.TimeoutExpired("git", 1)), ("show-ref", OSError("x")),
+                              ("show-ref", Res(128, "", "fatal")), ("for-each-ref", Res(128, "", "fatal")),
+                              ("worktree", Res(128, "", "fatal"))):
+            self.runner.git_fail = {verb: outcome}
+            if verb == "worktree":
+                run_git(["-C", str(self.repo), "branch", BRANCH])
+            self.assertEqual(self.reason(502, self.plan), "git_failed", verb)
+
+    def test_repo_changed(self):
+        plan_id = self.plan()["plan_id"]
+        run_git(["-C", str(self.repo), "branch", BRANCH])
+        self.assertEqual(self.reason(409, self.create, plan_id), "repo_changed")
+
+    def test_branch_and_base_unusable(self):
+        plan_id = self.plan()["plan_id"]
+        self.runner.git_fail["check-ref-format"] = Res(1, "", "")
+        self.assertEqual(self.reason(409, self.create, plan_id), "branch_unusable")
+        del self.runner.git_fail["check-ref-format"]
+        plan_id = self.plan()["plan_id"]
+        real = self.app.worktrees._branch_ok
+        self.app.worktrees._branch_ok = lambda path, name: name != "main" and real(path, name)
+        self.assertEqual(self.reason(409, self.create, plan_id), "base_unusable")
+
+    def test_not_ready(self):
+        self.interpreter.answer = {"repo_id": g.repo_id_of(self.other), "branch": "write-more"}
+        self.assertEqual(self.reason(409, self.create, self.plan("notes")["plan_id"]), "not_ready")
+
+    def test_fetch_failed_keeps_offline(self):
+        self.runner.git_fail["fetch"] = Res(128, "", "fatal: secret")
+        with self.assertRaises(g.RequestRejected) as caught:
+            self.create(self.plan()["plan_id"])
+        refused = caught.exception
+        self.assertEqual((refused.status, refused.extra["reason"]), (502, "fetch_failed"))
+        self.assertIn("offline", refused.extra)
+        self.assertTrue(refused.message.startswith("Could not fetch origin/main"))
+
+    def test_wt_refusals(self):
+        self.app = self.make(config={"wt": None})
+        self.assertEqual(self.reason(409, self.create, self.plan()["plan_id"]), "wt_missing")
+        self.app = self.make()
+        self.runner.on_wt_new = unittest.mock.Mock(side_effect=OSError("x"))
+        self.assertEqual(self.reason(409, self.create, self.plan()["plan_id"]), "wt_unrunnable")
+        self.runner.on_wt_new = unittest.mock.Mock(side_effect=subprocess.TimeoutExpired("wt", 1))
+        self.assertEqual(self.reason(502, self.create, self.plan()["plan_id"]), "wt_timeout")
+        self.runner.on_wt_new = None
+        self.runner.wt_new_result = Res(1, "", "wt: failed\n")
+        self.assertEqual(self.reason(502, self.create, self.plan()["plan_id"]), "wt_failed")
+        self.runner.wt_new_result = Res(0, "ok\n")
+        self.assertEqual(self.reason(502, self.create, self.plan()["plan_id"]), "no_folder")
+        self.runner.wt_new_result = None
+        real = self.runner._wt_new
+
+        def nameless(branch, cwd, base=None):
+            done = real(branch, cwd, base)
+            self.runner.wt_names.clear()
+            return done
+        self.runner._wt_new = nameless
+        self.interpreter.answer = {"repo_id": g.repo_id_of(self.repo), "branch": "nameless"}
+        self.assertEqual(self.reason(502, self.create, self.plan("x")["plan_id"]), "no_session_name")
+
+    def test_every_refusal_in_the_worktree_code_names_a_reason(self):
+        source = inspect.getsource(g.NewWorktrees)
+        calls = re.findall(r"RequestRejected\((?:[^()]|\([^()]*\))*\)", source)
+        self.assertGreater(len(calls), 20)
+        for call in calls:
+            self.assertRegex(call, r"reason=\"[a-z_]+\"", call)
+
+    def test_reasons_are_codes(self):
+        source = inspect.getsource(g.NewWorktrees) + inspect.getsource(g.Gateway.worktree_create)
+        for code in re.findall(r"reason=\"([^\"]*)\"", source):
+            self.assertRegex(code, r"^[a-z][a-z_]+$")
 
 
 # ---------------------------------------------------------------- new worktree: the claude interpreter
@@ -6502,6 +6780,731 @@ class LocalSpeechPageTests(unittest.TestCase):
     def test_leaving_or_sending_discards_a_recording(self):
         body = self.section("function stopListening", "function startListening")
         self.assertIn("discardRecording()", body)
+
+
+# ---------------------------------------------------------------- Android app: refusal reasons (S1)
+
+REASONS = frozenset({
+    "bad_text", "not_listed", "stopped", "no_orchestrator", "pane_changed", "not_settled", "not_blocked",
+    "not_working", "draft_present", "screen_changed", "repeat_window", "action_running", "herdr_refused",
+    "herdr_timeout_maybe_sent", "herdr_failed", "already_running", "voice_command", "voice_noise", "speech_off",
+    "bad_audio_type", "audio_empty", "audio_too_large", "transcribe_busy", "transcribe_rate", "speech_failed",
+    "restart_refused", "restart_failed"})
+
+
+class ReasonCase(GatewayCase):
+    def reason(self, code, fn, *args, **extra_fields):
+        """The refusal's status and machine-readable reason, plus any extra fields asked for."""
+        with self.assertRaises(g.RequestRejected) as caught:
+            fn(*args)
+        rejected = caught.exception
+        self.assertEqual(rejected.status, code, rejected.message)
+        reason = rejected.extra.get("reason")
+        self.assertIn(reason, REASONS, rejected.message)
+        for name, value in extra_fields.items():
+            self.assertEqual(rejected.extra.get(name), value, name)
+        return reason, rejected
+
+
+class PromptReasonTests(ReasonCase):
+    def send(self, text="hello", session=SCRATCH, **extra):
+        return self.app.prompt({"session": session, "text": text, **extra})
+
+    def test_bad_text(self):
+        for text in (None, 3, "", "   ", "x" * (g.MAX_PROMPT_CHARS + 1)):
+            self.assertEqual(self.reason(400, self.send, text)[0], "bad_text", text)
+
+    def test_not_listed(self):
+        for name in ("wt-absent", None, "phone"):
+            self.assertEqual(self.reason(404, self.send, "hi", name)[0], "not_listed")
+
+    def test_stopped(self):
+        self.runner.sessions[SCRATCH].running = False
+        self.assertEqual(self.reason(409, self.send)[0], "stopped")
+
+    def test_no_orchestrator(self):
+        self.runner.sessions[SCRATCH].agents = []
+        self.assertEqual(self.reason(409, self.send)[0], "no_orchestrator")
+        self.runner.sessions[SCRATCH].agents = [agent_row(), agent_row("w1:p2", "w1:t1")]
+        self.assertEqual(self.reason(409, self.send)[0], "no_orchestrator")
+
+    def test_pane_changed(self):
+        self.runner.sessions[SCRATCH].get_row = agent_row(terminal="term_other")
+        self.assertEqual(self.reason(409, self.send)[0], "pane_changed")
+
+    def test_not_settled_carries_the_status(self):
+        for status in ("working", "blocked", "unknown"):
+            self.set_status(status)
+            reason, rejected = self.reason(409, self.send, status=status)
+            self.assertEqual(reason, "not_settled")
+            self.assertEqual(rejected.message, f"The orchestrator is {status}, so I did not send text.")
+
+    def test_draft_present(self):
+        self.runner.sessions[SCRATCH].ansi = TYPED_BOX
+        self.assertEqual(self.reason(409, self.send)[0], "draft_present")
+
+    def test_repeat_window(self):
+        self.send()
+        self.clock.t += 0.1
+        self.assertEqual(self.reason(409, self.send)[0], "repeat_window")
+
+    def test_action_running(self):
+        entered, release = threading.Event(), threading.Event()
+
+        def hold():
+            entered.set()
+            release.wait(5)
+        self.runner.on_prompt = hold
+        first = threading.Thread(target=self.send)
+        first.start()
+        try:
+            self.assertTrue(entered.wait(5))
+            self.assertEqual(self.reason(409, self.send)[0], "action_running")
+        finally:
+            release.set()
+            first.join(5)
+
+    def test_herdr_refused(self):
+        self.runner.prompt_result = err("agent_blocked", "agent is blocked")
+        self.assertEqual(self.reason(409, self.send)[0], "herdr_refused")
+
+    def test_herdr_timeout_maybe_sent(self):
+        self.runner.fail[(SCRATCH, ("agent", "prompt"))] = subprocess.TimeoutExpired("herdr", 15)
+        self.assertEqual(self.reason(502, self.send)[0], "herdr_timeout_maybe_sent")
+
+    def test_herdr_failed(self):
+        self.runner.prompt_result = err("something", "failed")
+        self.assertEqual(self.reason(502, self.send)[0], "herdr_failed")
+        self.runner.prompt_result = Res(0, '{"id":"cli:agent:prompt","result":{"type":"ok"}}')
+        self.runner.fail[(SCRATCH, ("tab", "list"))] = err("server_not_running", "no server")
+        self.clock.t += 100
+        self.assertEqual(self.reason(502, self.send)[0], "herdr_failed")
+
+    def test_reasons_never_carry_the_text(self):
+        self.runner.prompt_result = err("something", "failed")
+        _, rejected = self.reason(502, self.send, "secret words")
+        self.assertNotIn("secret", json.dumps(rejected.extra))
+
+
+class KeysStopReasonTests(ReasonCase):
+    def press(self, key="1", token=None):
+        token = g.screen_token("visible screen") if token is None else token
+        return self.app.keys({"session": SCRATCH, "key": key, "screen_token": token})
+
+    def stop(self, session=SCRATCH):
+        return self.app.stop({"session": session})
+
+    def test_bad_key(self):
+        self.set_status("blocked")
+        for key in ("3", None, "ctrl+c"):
+            self.assertEqual(self.reason(400, self.press, key)[0], "bad_text")
+
+    def test_not_blocked_carries_the_status(self):
+        for status in ("idle", "working"):
+            self.set_status(status)
+            self.assertEqual(self.reason(409, self.press, status=status)[0], "not_blocked")
+
+    def test_screen_changed_keeps_its_fields(self):
+        self.set_status("blocked")
+        reason, rejected = self.reason(409, self.press, "1", "old", output="visible screen",
+                                       screen_token=g.screen_token("visible screen"))
+        self.assertEqual(reason, "screen_changed")
+
+    def test_key_repeat_window_and_foreign_session(self):
+        self.set_status("blocked")
+        self.press("enter")
+        self.clock.t += 0.1
+        self.assertEqual(self.reason(409, self.press, "enter")[0], "repeat_window")
+        self.runner.sessions["phone"] = FakeSession(agents=[agent_row(status="blocked")])
+        self.assertEqual(self.reason(404, self.app.keys, {"session": "phone", "key": "1"})[0], "not_listed")
+
+    def test_key_stopped_and_herdr_refused(self):
+        self.set_status("blocked")
+        self.runner.fail[(SCRATCH, ("agent", "send-keys"))] = err("agent_not_found", "gone")
+        self.assertEqual(self.reason(409, self.press)[0], "herdr_refused")
+        self.runner.sessions[SCRATCH].running = False
+        self.assertEqual(self.reason(409, self.press)[0], "stopped")
+
+    def test_not_working_carries_the_status(self):
+        for status in ("idle", "blocked"):
+            self.set_status(status)
+            reason, rejected = self.reason(409, self.stop, status=status)
+            self.assertEqual(reason, "not_working")
+            self.assertEqual(rejected.message, f"The orchestrator is {status}, so I did not send stop.")
+
+    def test_stop_other_paths(self):
+        self.set_status("working")
+        self.stop()
+        self.clock.t += 0.1
+        self.assertEqual(self.reason(409, self.stop)[0], "repeat_window")
+        self.assertEqual(self.reason(404, self.stop, "default")[0], "not_listed")
+        self.clock.t += 100
+        self.runner.fail[(SCRATCH, ("agent", "send-keys"))] = err("weird", "x")
+        self.assertEqual(self.reason(502, self.stop)[0], "herdr_failed")
+        self.clock.t += 100
+        self.runner.sessions[SCRATCH].agents = []
+        self.assertEqual(self.reason(409, self.stop)[0], "no_orchestrator")
+        self.runner.sessions[SCRATCH].running = False
+        self.assertEqual(self.reason(409, self.stop)[0], "stopped")
+
+
+class RestartReasonTests(ReasonCase):
+    def setUp(self):
+        super().setUp()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.sessions_dir = Path(self.tmp.name) / "sessions" / SCRATCH
+        self.sessions_dir.mkdir(parents=True)
+        self.worktree = str(Path(self.tmp.name) / "repo")
+        os.mkdir(self.worktree)
+        (self.sessions_dir / "session.json").write_text(json.dumps(
+            {"version": 3, "workspaces": [{"identity_cwd": self.worktree, "tabs": []}]}))
+        self.runner.session_dirs[SCRATCH] = str(self.sessions_dir)
+        self.runner.sessions[SCRATCH].running = False
+        self.runner.wt_names[self.worktree] = SCRATCH
+
+    def restart(self, session=SCRATCH, app=None):
+        return (app or self.app).restart({"session": session})
+
+    def test_already_running(self):
+        self.runner.sessions[SCRATCH].running = True
+        self.assertEqual(self.reason(409, self.restart)[0], "already_running")
+
+    def test_not_listed(self):
+        self.assertEqual(self.reason(404, self.restart, "wt-absent")[0], "not_listed")
+
+    def test_refusals_before_wt_up(self):
+        self.runner.wt_names[self.worktree] = "wt-something-else"
+        reason, rejected = self.reason(409, self.restart)
+        self.assertEqual(reason, "restart_refused")
+        self.assertIn("wt-something-else", rejected.message)
+        self.assertNotIn(self.worktree, json.dumps(rejected.extra))
+        (self.sessions_dir / "session.json").unlink()
+        self.assertEqual(self.reason(409, self.restart)[0], "restart_refused")
+        (self.sessions_dir / "session.json").write_text(json.dumps(
+            {"version": 3, "workspaces": [{"identity_cwd": self.worktree, "tabs": []}]}))
+        app = build(self.runner, self.clock, replace(CONFIG, wt=None))
+        self.assertEqual(self.reason(409, self.restart, SCRATCH, app)[0], "restart_refused")
+
+    def test_wt_up_failure(self):
+        self.runner.wt_up_result = Res(1, "", "wt: session did not come up\n")
+        reason, rejected = self.reason(502, self.restart)
+        self.assertEqual(reason, "restart_failed")
+        self.assertNotIn("did not come up", json.dumps(rejected.extra))
+
+    def test_repeat_window(self):
+        self.restart()
+        self.clock.t += 0.1
+        self.assertEqual(self.reason(409, self.restart)[0], "repeat_window")
+
+
+class TranscribeReasonTests(ReasonCase):
+    def setUp(self):
+        super().setUp()
+        self.local = FakeLocal()
+        self.addCleanup(self.local.release)
+        self.app = build(self.runner, self.clock, speech=self.local)
+
+    def test_speech_off(self):
+        app = build(self.runner, self.clock, speech_reason="No speech token is stored.")
+        self.assertEqual(self.reason(404, app.transcribe, WEBM, "audio/webm")[0], "speech_off")
+
+    def test_bad_audio_type_empty_and_too_large(self):
+        self.assertEqual(self.reason(415, self.app.transcribe, WEBM, "text/plain")[0], "bad_audio_type")
+        self.assertEqual(self.reason(415, self.app.transcribe, WEBM, None)[0], "bad_audio_type")
+        self.assertEqual(self.reason(400, self.app.transcribe, b"", "audio/webm")[0], "audio_empty")
+        big = b"\x00" * (g.MAX_TRANSCRIBE_BYTES + 1)
+        self.assertEqual(self.reason(413, self.app.transcribe, big, "audio/webm")[0], "audio_too_large")
+
+    def test_busy_and_rate(self):
+        self.local.transcribe_gate = threading.Event()
+        with g.ThreadPoolExecutor(max_workers=1) as pool:
+            first = pool.submit(self.app.transcribe, WEBM, "audio/webm")
+            self.assertTrue(wait_for(lambda: len(self.local.transcribed) == 1))
+            reason, rejected = self.reason(429, self.app.transcribe, WEBM, "audio/webm")
+            self.assertEqual((reason, rejected.retry_after), ("transcribe_busy", 2))
+            self.local.transcribe_gate.set()
+            first.result(5)
+        for _ in range(g.TRANSCRIBE_PER_MINUTE - 1):
+            self.app.transcribe(WEBM, "audio/webm")
+        reason, rejected = self.reason(429, self.app.transcribe, WEBM, "audio/webm")
+        self.assertEqual(reason, "transcribe_rate")
+        self.assertGreater(rejected.retry_after, 0)
+
+    def test_speech_failed_without_its_words(self):
+        self.local.transcribe_fail = g.VoiceError(500, "the model said something private")
+        reason, rejected = self.reason(502, self.app.transcribe, WEBM, "audio/webm")
+        self.assertEqual(reason, "speech_failed")
+        self.assertNotIn("private", json.dumps(rejected.extra))
+
+
+class HttpReasonTests(HttpCase):
+    def make_app(self):
+        self.local = FakeLocal()
+        self.addCleanup(self.local.release)
+        return build(self.runner, self.clock, tailscale=self.tailscale, speech=self.local)
+
+    def setUp(self):
+        super().setUp()
+        self.log_in()
+
+    def test_prompt_refusal_body(self):
+        self.runner.sessions[SCRATCH].agents[0]["agent_status"] = "working"
+        status, _, body, _ = self.post("/api/prompt", {"session": SCRATCH, "text": "hi"})
+        self.assertEqual(status, 409)
+        self.assertEqual(json.loads(body), {"error": "The orchestrator is working, so I did not send text.",
+                                            "reason": "not_settled", "status": "working"})
+
+    def test_keys_stop_restart_bodies(self):
+        self.assertEqual(json.loads(self.post("/api/keys", {"session": SCRATCH, "key": "x"})[2])["reason"], "bad_text")
+        self.assertEqual(json.loads(self.post("/api/stop", {"session": SCRATCH})[2])["reason"], "not_working")
+        self.assertEqual(json.loads(self.post("/api/restart", {"session": SCRATCH})[2])["reason"], "already_running")
+
+    def test_transcribe_bodies(self):
+        def transcribe(data=WEBM, kind="audio/webm"):
+            return self.post("/api/transcribe", None, raw=data, Content_Type=kind)
+        status, _, body, _ = transcribe(kind="text/plain")
+        self.assertEqual((status, json.loads(body)["reason"]), (415, "bad_audio_type"))
+        status, _, body, _ = transcribe(data=b"")
+        self.assertEqual((status, json.loads(body)["reason"]), (400, "audio_empty"))
+        with unittest.mock.patch.object(g, "MAX_TRANSCRIBE_BYTES", 1000):
+            status, _, body, _ = transcribe(data=b"\x00" * 1001)
+        self.assertEqual((status, json.loads(body)), (413, {"error": "body too large", "reason": "audio_too_large"}))
+
+    def test_guards_keep_their_bodies(self):
+        self.assertEqual(json.loads(self.post("/api/prompt", {"session": SCRATCH, "text": "hi"},
+                                              Origin="https://evil.com")[2]), {"error": "origin not allowed"})
+        self.assertEqual(json.loads(self.post("/api/prompt", {"session": SCRATCH, "text": "hi"},
+                                              Content_Type="text/plain")[2]),
+                         {"error": "content type must be application/json"})
+        with unittest.mock.patch.object(g, "MAX_BODY_BYTES", 10):
+            self.assertEqual(json.loads(self.post("/api/prompt", {"session": SCRATCH, "text": "hello there"})[2]),
+                             {"error": "body too large"})
+        self.token = None
+        self.assertEqual(json.loads(self.post("/api/prompt", {"session": SCRATCH, "text": "hi"})[2]),
+                         {"error": "log in first"})
+
+    def test_voice_noise_over_http_is_not_logged(self):
+        status, _, body, _ = self.post("/api/prompt", {"session": SCRATCH, "text": "Thanks for watching!",
+                                                       "voice": True})
+        self.assertEqual((status, json.loads(body)["reason"]), (422, "voice_noise"))
+        self.assertNotIn("watching", self.log.getvalue())
+        self.assertNotIn(b"watching", body)
+
+
+# ---------------------------------------------------------------- Android app: voice prompts (S2)
+
+NOISE_PHRASES = ("thank you", "thanks for watching", "thank you for watching", "you", "bye", "okay", "so",
+                 "please subscribe", "subtitles by the amara org community", "i m sorry")
+NOISE_AS_HEARD = ("Thank you.", "THANK YOU!", "  thanks for watching  ", "Thank you for watching!", "You", "Bye.",
+                  "Okay.", "So...", "Please subscribe.", "Subtitles by the Amara.org community", "I'm sorry.",
+                  "I’m sorry", "thank-you", "Thank you . ", "okay?!")
+NEAR_MISSES = ("thank you, now run the tests", "okay run the tests", "so what is next", "you can merge it now",
+               "bye bye", "thank you very much for the fix", "sorry, run it again")
+
+
+class VoiceNoiseTests(unittest.TestCase):
+    def test_the_fixed_list(self):
+        self.assertEqual(tuple(g.VOICE_NOISE_PHRASES), NOISE_PHRASES)
+
+    def test_each_phrase_and_how_whisper_writes_it(self):
+        for text in NOISE_PHRASES + NOISE_AS_HEARD:
+            self.assertTrue(g.is_voice_noise(text), text)
+
+    def test_near_misses_are_not_noise(self):
+        for text in NEAR_MISSES + ("", "thank", "yous", "okay okay"):
+            self.assertFalse(g.is_voice_noise(text), text)
+
+
+class VoicePromptTests(ReasonCase):
+    def send(self, text="hello", voice=None, **extra):
+        payload = {"session": SCRATCH, "text": text, **extra}
+        if voice is not None:
+            payload["voice"] = voice
+        return self.app.prompt(payload)
+
+    def prompts(self):
+        return [c["argv"][-1] for c in self.runner.named("agent", "prompt")]
+
+    def nonce(self):
+        return re.search(r"SPOKEN\[([0-9a-f]+)\]", self.prompts()[-1]).group(1)
+
+    def herdr_calls(self):
+        return [c for c in self.runner.calls if c["argv"][0] == "herdr"]
+
+    def test_typed_prompts_send_todays_exact_text(self):
+        for voice in (None, False):
+            self.clock.t += 100
+            self.assertEqual(self.send("what is 2", voice), {"ok": True, "draft": "unknown"})
+            self.assertEqual(self.prompts()[-1], "what is 2 " + TODAYS_INSTRUCTION.format(nonce=self.nonce()))
+
+    def test_voice_prompts_carry_the_voice_instruction(self):
+        self.assertEqual(self.send("what is 2", True), {"ok": True, "draft": "unknown"})
+        sent = self.prompts()[-1]
+        self.assertEqual(sent, "what is 2 " + voice_instruction(self.nonce()))
+
+    def test_invalid_voice_values(self):
+        for value in (None, 1, 0, "true", "yes", [], {}, [True]):
+            payload = {"session": SCRATCH, "text": "hello", "voice": value}
+            self.assertEqual(self.reason(400, self.app.prompt, payload)[0], "bad_text", value)
+        self.assertEqual(self.herdr_calls(), [])
+
+    def test_commands_are_refused_by_voice_without_touching_herdr(self):
+        for text in ("/compact", "/help me", "!ls", "! ls", "  /clear", "\x00/x"):
+            self.assertEqual(self.reason(400, self.send, text, True)[0], "voice_command", text)
+        self.assertEqual(self.herdr_calls(), [])
+        self.send("/compact", False)
+        self.assertEqual(self.prompts(), ["/compact"])
+
+    def test_noise_is_refused_by_voice_without_touching_herdr(self):
+        for text in NOISE_PHRASES + NOISE_AS_HEARD:
+            self.assertEqual(self.reason(422, self.send, text, True)[0], "voice_noise", text)
+        self.assertEqual(self.herdr_calls(), [])
+
+    def test_noise_is_refused_even_for_a_stopped_or_unlisted_session(self):
+        self.runner.sessions[SCRATCH].running = False
+        self.assertEqual(self.reason(422, self.send, "Thank you.", True)[0], "voice_noise")
+        self.assertEqual(self.reason(422, self.app.prompt, {"session": "wt-absent", "text": "Bye.", "voice": True})[0],
+                         "voice_noise")
+        self.assertEqual(self.herdr_calls(), [])
+
+    def test_near_misses_are_sent_by_voice(self):
+        for text in NEAR_MISSES:
+            self.clock.t += 100
+            self.send(text, True)
+        self.assertEqual([p.split(" (Sent from")[0] for p in self.prompts()], list(NEAR_MISSES))
+
+    def test_typed_noise_is_sent_as_today(self):
+        self.send("Thank you.", False)
+        self.clock.t += 100
+        self.send("okay")
+        self.assertEqual(len(self.prompts()), 2)
+
+    def test_the_text_rules_still_come_first(self):
+        self.assertEqual(self.reason(400, self.send, "", True)[0], "bad_text")
+        self.assertEqual(self.reason(400, self.send, None, True)[0], "bad_text")
+
+    def test_the_other_rules_still_hold_for_voice(self):
+        self.set_status("working")
+        self.assertEqual(self.reason(409, self.send, "run the tests", True)[0], "not_settled")
+        self.assertEqual(self.prompts(), [])
+
+    def test_a_tap_confirmation_carries_the_tap_instruction(self):
+        self.assertEqual(self.send("yes, go ahead", True, confirm="tap"), {"ok": True, "draft": "unknown"})
+        self.assertEqual(self.prompts()[-1], "yes, go ahead " + tap_instruction(self.nonce()))
+        self.assertTrue(self.app.announcer.pending[SCRATCH].voice)  # Its reply is read like any voice reply.
+        self.clock.t += 100
+        self.send("no, do not do that", True, confirm="tap")
+        self.assertEqual(self.prompts()[-1], "no, do not do that " + tap_instruction(self.nonce()))
+
+    def test_invalid_confirm_values(self):
+        for value in (None, "", "TAP", "tap ", "voice", True, 1, [], {}, ["tap"]):
+            for voice in (True, False):
+                payload = {"session": SCRATCH, "text": "yes, go ahead", "voice": voice, "confirm": value}
+                self.assertEqual(self.reason(400, self.app.prompt, payload)[0], "bad_text", value)
+        self.assertEqual(self.herdr_calls(), [])
+
+    def test_a_tap_mark_without_voice_is_ignored(self):
+        for voice in (None, False):
+            self.clock.t += 100
+            self.send("yes", voice, confirm="tap")
+            self.assertEqual(self.prompts()[-1], "yes " + TODAYS_INSTRUCTION.format(nonce=self.nonce()))
+            self.assertFalse(self.app.announcer.pending[SCRATCH].voice)
+
+    def test_a_tap_confirmation_keeps_the_voice_text_rules(self):
+        for text, status, code in (("/compact", 400, "voice_command"), ("Thank you.", 422, "voice_noise")):
+            payload = {"session": SCRATCH, "text": text, "voice": True, "confirm": "tap"}
+            self.assertEqual(self.reason(status, self.app.prompt, payload)[0], code)
+        self.assertEqual(self.herdr_calls(), [])
+
+
+# ---------------------------------------------------------------- Android app: clarify by voice (S4)
+
+TODAYS_INSTRUCTION = ("(Sent from my phone. End your reply with one final line of at most two plain sentences, written "
+                      "to be read aloud, with no code, paths or markdown, in exactly this form: SPOKEN[{nonce}]: your "
+                      "spoken summary)")
+VOICE_CLAUSE = (
+    "(Sent from my phone by voice, so the words may be misheard. If the request is unclear, ambiguous, risky, or looks "
+    "like a speech-recognition mistake, do not act on it: change nothing and run nothing, and instead ask one short "
+    "question, writing your spoken line as ASK: followed by the question, ending with a question mark. If the question "
+    "is whether to do something destructive or hard to undo (deleting or overwriting files, branches or data, git push "
+    "or force push, reset or rebase that drops work, dropping or migrating a database, deploying, or anything that "
+    "spends money), write ASK!: instead of ASK:, even if the request itself was clear; such a step is confirmed by a "
+    "tap on the phone, never by voice. A spoken reply to an ASK: question approves the proposed step if it is a plain "
+    "yes, sure, go ahead or the like, unless the step is destructive or hard to undo: then it approves only if it is "
+    "exactly one of: yes go ahead, yes do it, yes please proceed, yes thats right (ignoring case and punctuation), and "
+    "a bare yes, yeah, sure or okay is not approval, so ask again with ASK!:. ")
+TAP_CLAUSE = (
+    "(Sent from my phone by a tap on the Yes or No button shown for your last ASK!: or ASK: question, so this reply "
+    "is certain and was not misheard: it is the user's explicit approval or refusal of that step. Ask any new "
+    "question with ASK: or ASK!: as before. ")
+APPROVAL_PHRASES = ("yes go ahead", "yes do it", "yes please proceed", "yes thats right")
+DESTRUCTIVE_WORDS = frozenset(("delete remove rm overwrite force push drop reset rebase wipe purge truncate deploy "
+                               "publish pay purchase charge").split())
+
+
+def voice_instruction(nonce):
+    return VOICE_CLAUSE + TODAYS_INSTRUCTION.format(nonce=nonce).split("Sent from my phone. ", 1)[1]
+
+
+def tap_instruction(nonce):
+    return TAP_CLAUSE + TODAYS_INSTRUCTION.format(nonce=nonce).split("Sent from my phone. ", 1)[1]
+
+
+class VoiceInstructionTests(unittest.TestCase):
+    def test_typed_instruction_is_byte_identical_to_today(self):
+        self.assertEqual(g.summary_instruction(NONCE), TODAYS_INSTRUCTION.format(nonce=NONCE))
+        self.assertEqual(g.summary_instruction(NONCE, voice=False), TODAYS_INSTRUCTION.format(nonce=NONCE))
+        self.assertEqual(g.with_summary_instruction("x", NONCE), "x " + TODAYS_INSTRUCTION.format(nonce=NONCE))
+
+    def test_voice_instruction_is_the_approved_text(self):
+        self.assertEqual(g.summary_instruction(NONCE, voice=True), voice_instruction(NONCE))
+        self.assertEqual(g.with_summary_instruction("x", NONCE, voice=True), "x " + voice_instruction(NONCE))
+
+    def test_voice_instruction_rules(self):
+        text = g.summary_instruction(NONCE, voice=True)
+        self.assertEqual(len(text.splitlines()), 1)
+        for words in ("ASK:", "ASK!:", "question mark", "do not act", "misheard", "tap", "deleting", "force push",
+                      "database", "money", "not approval", *g.VOICE_APPROVAL_PHRASES):
+            self.assertIn(words, text)
+        self.assertEqual(text.count(TAG), 1)
+        self.assertTrue(text.endswith(f"{TAG} {g.SPOKEN_PLACEHOLDER})"))
+
+    def test_plain_questions_take_a_plain_yes_and_destructive_ones_the_strict_phrases(self):
+        text = g.summary_instruction(NONCE, voice=True)
+        plain = text.index("plain yes, sure, go ahead")
+        strict = text.index("destructive or hard to undo:")
+        self.assertLess(plain, strict)
+        self.assertLess(strict, text.index(", ".join(g.VOICE_APPROVAL_PHRASES)))
+        self.assertIn("never by voice", text)  # ASK!: stays tap only.
+        self.assertNotIn("A spoken reply approves a proposed step only if", text)
+
+    def test_tap_instruction_is_the_approved_text(self):
+        self.assertEqual(g.summary_instruction(NONCE, voice=True, tap=True), tap_instruction(NONCE))
+        self.assertEqual(g.with_summary_instruction("yes, go ahead", NONCE, voice=True, tap=True),
+                         "yes, go ahead " + tap_instruction(NONCE))
+
+    def test_tap_instruction_rules(self):
+        text = g.summary_instruction(NONCE, voice=True, tap=True)
+        self.assertEqual(len(text.splitlines()), 1)
+        for words in ("tap", "Yes or No button", "ASK!:", "certain", "not misheard", "explicit approval or refusal"):
+            self.assertIn(words, text)
+        for words in ("by voice", "may be misheard", "never by voice", "not approval", *g.VOICE_APPROVAL_PHRASES):
+            self.assertNotIn(words, text)
+        self.assertEqual(text.count(TAG), 1)
+        self.assertTrue(text.endswith(f"{TAG} {g.SPOKEN_PLACEHOLDER})"))
+
+    def test_tap_without_voice_is_todays_text(self):
+        self.assertEqual(g.summary_instruction(NONCE, voice=False, tap=True), TODAYS_INSTRUCTION.format(nonce=NONCE))
+
+    def test_approval_phrases(self):
+        self.assertEqual(tuple(g.VOICE_APPROVAL_PHRASES), APPROVAL_PHRASES)
+        for phrase in g.VOICE_APPROVAL_PHRASES:
+            self.assertGreaterEqual(len(phrase.split()), 3, phrase)
+            self.assertEqual(g.normalise_phrase(phrase), phrase)
+
+    def test_normalise_phrase(self):
+        cases = {"Yes, go ahead!": "yes go ahead", "Yes, that's right.": "yes thats right",
+                 "Yes, that’s right": "yes thats right", "  YES   do   it ": "yes do it",
+                 "yes... please-proceed?": "yes please proceed", "": "", "!!!": "", "rm -rf build/": "rm rf build"}
+        for text, expected in cases.items():
+            self.assertEqual(g.normalise_phrase(text), expected, text)
+
+    def test_destructive_words(self):
+        self.assertEqual(frozenset(g.VOICE_DESTRUCTIVE_WORDS), DESTRUCTIVE_WORDS)
+
+
+class SplitAskTests(unittest.TestCase):
+    def test_questions(self):
+        self.assertEqual(g.split_ask("ASK: Which branch?"), (True, "Which branch?"))
+        self.assertEqual(g.split_ask("ask:  which branch"), (True, "which branch?"))
+        self.assertEqual(g.split_ask("  Ask : x?")[0], False)  # The colon must follow ASK.
+        self.assertEqual(g.split_ask("ASK: Which test file?"), (True, "Which test file?"))
+        self.assertEqual(g.split_ask("ASK: Pushing ahead with the plan?"), (True, "Pushing ahead with the plan?"))
+
+    def test_no_line_when_the_question_is_empty(self):
+        for text in ("ASK:", "ASK:   ", "ask: ?", "ASK!:", "ASK!:  ", "ASK!: ??"):
+            ask, spoken = g.split_ask(text)
+            self.assertFalse(ask, text)
+            self.assertIsNone(spoken, text)
+
+    def test_not_questions(self):
+        for text in ("Asked about it", "Done. ASK: x?", "ASK !: x?", "It is done. Want me to run the tests?",
+                     "TASK: done", "ASKED: x"):
+            self.assertEqual(g.split_ask(text), (False, text), text)
+
+    def test_confirmations(self):
+        self.assertEqual(g.split_ask("ASK!: Force push to main?"), ("confirm", "Force push to main?"))
+        self.assertEqual(g.split_ask("ask!: delete wt-old"), ("confirm", "delete wt-old?"))
+        self.assertEqual(g.split_ask("  ASK!:   Shall I tidy up?"), ("confirm", "Shall I tidy up?"))
+
+    def test_destructive_words_upgrade_a_question(self):
+        self.assertEqual(g.split_ask("ASK: Shall I delete the build folder?"),
+                         ("confirm", "Shall I delete the build folder?"))
+        for word in sorted(DESTRUCTIVE_WORDS):
+            self.assertEqual(g.split_ask(f"ASK: Should I {word.upper()} it?")[0], "confirm", word)
+        for text in ("ASK: Which test file?", "ASK: Pushing ahead with the plan?", "ASK: Is the deployment fine?",
+                     "ASK: Removed or kept?", "ASK: Is the payment page right?"):
+            self.assertIs(g.split_ask(text)[0], True, text)
+
+    def test_long_question_is_cut_and_still_a_question(self):
+        ask, spoken = g.split_ask("ASK: " + "word " * 80 + "end?")
+        self.assertIs(ask, True)
+        self.assertLessEqual(len(spoken), g.MAX_SPOKEN_CHARS)
+        self.assertTrue(spoken.endswith("?"))
+        self.assertTrue(spoken.startswith("word word"))
+        self.assertNotIn("  ", spoken)
+        ask, spoken = g.split_ask("ASK!: " + "x" * 400)
+        self.assertEqual(ask, "confirm")
+        self.assertLessEqual(len(spoken), g.MAX_SPOKEN_CHARS)
+        self.assertTrue(spoken.endswith("?"))
+
+
+class VoiceEchoTests(unittest.TestCase):
+    def test_echoed_voice_instruction_never_matches_at_any_width(self):
+        echo_text = "fix it " + g.summary_instruction(NONCE, voice=True)
+        starts = 0
+        for width in range(20, 200):
+            screen = wrapped(echo_text, width)
+            starts += any(line.strip().startswith(TAG) for line in screen.splitlines())
+            self.assertIsNone(g.find_spoken(screen + "\n\n✻ Thinking…\n", NONCE), width)
+        self.assertGreater(starts, 0, "no width put the tag at the start of a line, so this tested nothing")
+
+    def test_the_question_is_found_below_a_wrapped_echo(self):
+        echo_text = "fix it " + g.summary_instruction(NONCE, voice=True)
+        for width in range(20, 200):
+            screen = wrapped(echo_text, width) + f"\n\n⏺ {TAG} ASK: Which bug do you mean?\n\n───\n❯ \n───\n"
+            self.assertEqual(g.find_spoken(screen, NONCE), "ASK: Which bug do you mean?", width)
+
+
+class VoiceAnnouncementTests(GatewayCase):
+    def setUp(self):
+        super().setUp()
+        self.session = self.runner.sessions[SCRATCH]
+
+    def send(self, text="fix it", voice=True):
+        self.app.prompt({"session": SCRATCH, "text": text, "voice": voice})
+
+    def nonce(self):
+        sent = self.runner.named("agent", "prompt")[-1]["argv"][-1]
+        return re.search(r"SPOKEN\[([0-9a-f]+)\]", sent).group(1)
+
+    def events(self):
+        return self.app.sessions_view()["events"]
+
+    def reply(self, line):
+        self.session.visible = f"> fix it\n\n⏺ SPOKEN[{self.nonce()}]: {line}\n\n───\n❯ \n───\n"
+
+    def test_the_record_remembers_voice(self):
+        self.send()
+        self.assertTrue(self.app.announcer.pending[SCRATCH].voice)
+        self.clock.t += 100
+        self.send(voice=False)
+        self.assertFalse(self.app.announcer.pending[SCRATCH].voice)
+        record = g.PendingSend(SCRATCH, NONCE, 0, "w1:p1", "term_1")
+        self.assertFalse(record.voice)
+
+    def test_a_question(self):
+        self.send()
+        self.reply("ASK: Did you mean the main branch?")
+        events = self.events()
+        self.assertEqual(len(events), 1)
+        self.assertEqual((events[0]["kind"], events[0]["text"], events[0]["ask"]),
+                         ("summary", "Did you mean the main branch?", True))
+        self.assertEqual(self.app.sessions_view()["waiting"], [])
+
+    def test_a_tap_only_confirmation(self):
+        self.send()
+        self.reply("ASK!: Delete branch wt-old?")
+        events = self.events()
+        self.assertEqual([(e["kind"], e["text"], e["ask"]) for e in events],
+                         [("summary", "Delete branch wt-old?", "confirm")])
+
+    def test_a_destructive_question_is_upgraded(self):
+        self.send()
+        self.reply("ASK: Shall I delete the build folder?")
+        self.assertEqual(self.events()[0]["ask"], "confirm")
+
+    def test_a_plain_voice_summary_has_no_ask(self):
+        self.send()
+        self.reply("Fixed it. Want me to run the tests?")
+        event = self.events()[0]
+        self.assertEqual(event["text"], "Fixed it. Want me to run the tests?")
+        self.assertNotIn("ask", event)
+        self.assertEqual(set(event), {"id", "kind", "session", "worktree", "text"})
+
+    def test_a_typed_prompt_is_never_altered(self):
+        self.send("fix it", voice=False)
+        self.reply("ASK: Did you mean the main branch?")
+        event = self.events()[0]
+        self.assertEqual(event["text"], "ASK: Did you mean the main branch?")
+        self.assertNotIn("ask", event)
+        self.assertEqual(set(event), {"id", "kind", "session", "worktree", "text"})
+
+    def test_an_empty_question_falls_back_to_check_screen(self):
+        self.send()
+        self.reply("ASK:")
+        self.assertEqual(self.events(), [])
+        self.clock.t += g.SETTLE_SECONDS + 1
+        events = self.events()
+        self.assertEqual([e["kind"] for e in events], ["check-screen"])
+        self.assertNotIn("ask", events[0])
+
+    def test_the_echo_alone_is_not_a_summary(self):
+        self.send()
+        sent = self.runner.named("agent", "prompt")[-1]["argv"][-1]
+        self.session.visible = wrapped(sent, 60) + "\n"
+        self.assertEqual(self.events(), [])
+
+    def test_a_tap_confirmation_is_announced_like_a_voice_prompt(self):
+        self.app.prompt({"session": SCRATCH, "text": "yes, go ahead", "voice": True, "confirm": "tap"})
+        self.reply("ASK: Shall I also run the tests?")
+        self.assertEqual([(e["kind"], e["text"], e["ask"]) for e in self.events()],
+                         [("summary", "Shall I also run the tests?", True)])
+
+    def test_needs_you_has_no_ask(self):
+        self.send()
+        self.set_status("blocked")
+        events = self.events()
+        self.assertEqual([e["kind"] for e in events], ["needs-you"])
+        self.assertNotIn("ask", events[0])
+
+
+class HttpVoiceAskTests(HttpCase):
+    def setUp(self):
+        super().setUp()
+        self.log_in()
+
+    def test_the_event_carries_ask_over_http(self):
+        self.assertEqual(self.post("/api/prompt", {"session": SCRATCH, "text": "fix it", "voice": True})[0], 200)
+        sent = self.runner.named("agent", "prompt")[-1]["argv"][-1]
+        self.assertIn("ASK!:", sent)
+        nonce = re.search(r"SPOKEN\[([0-9a-f]+)\]", sent).group(1)
+        self.runner.sessions[SCRATCH].visible = f"⏺ SPOKEN[{nonce}]: ASK: Which bug?\n"
+        listing = json.loads(self.request("GET", "/api/sessions")[2])
+        self.assertEqual([(e["text"], e["ask"]) for e in listing["events"]], [("Which bug?", True)])
+        self.assertNotIn("fix it", self.log.getvalue())
+
+    def test_typed_prompt_over_http_sends_todays_text(self):
+        self.assertEqual(self.post("/api/prompt", {"session": SCRATCH, "text": "hi", "voice": False})[0], 200)
+        sent = self.runner.named("agent", "prompt")[-1]["argv"][-1]
+        nonce = re.search(r"SPOKEN\[([0-9a-f]+)\]", sent).group(1)
+        self.assertEqual(sent, "hi " + TODAYS_INSTRUCTION.format(nonce=nonce))
+
+    def test_tap_confirmation_over_http(self):
+        payload = {"session": SCRATCH, "text": "yes, go ahead", "voice": True, "confirm": "tap"}
+        self.assertEqual(self.post("/api/prompt", payload)[0], 200)
+        sent = self.runner.named("agent", "prompt")[-1]["argv"][-1]
+        nonce = re.search(r"SPOKEN\[([0-9a-f]+)\]", sent).group(1)
+        self.assertEqual(sent, "yes, go ahead " + tap_instruction(nonce))
+        status, _, body, _ = self.post("/api/prompt", {**payload, "confirm": "voice"})
+        self.assertEqual((status, json.loads(body)["reason"]), (400, "bad_text"))
+        self.assertNotIn("go ahead", self.log.getvalue())
+
+    def test_invalid_voice_over_http(self):
+        status, _, body, _ = self.post("/api/prompt", {"session": SCRATCH, "text": "hi", "voice": "yes"})
+        self.assertEqual((status, json.loads(body)["reason"]), (400, "bad_text"))
+        self.assertEqual(self.runner.named("agent", "prompt"), [])
 
 
 if __name__ == "__main__":

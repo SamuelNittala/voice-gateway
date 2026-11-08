@@ -1,0 +1,8 @@
+{
+  "status": 409,
+  "headers": {},
+  "body": {
+    "error": "No agent is running in this session's orchestrator tab.",
+    "reason": "no_orchestrator"
+  }
+}

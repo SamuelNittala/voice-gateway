@@ -1,0 +1,8 @@
+{
+  "status": 409,
+  "headers": {},
+  "body": {
+    "error": "New worktrees are off. Set VOICE_GATEWAY_REPO_ROOTS to the folders that hold your repos (absolute paths, colon separated; unset means ~/work and ~/personal), then restart the gateway.",
+    "reason": "worktrees_off"
+  }
+}

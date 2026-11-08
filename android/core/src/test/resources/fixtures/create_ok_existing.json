@@ -1,0 +1,12 @@
+{
+  "status": 200,
+  "headers": {},
+  "body": {
+    "ok": true,
+    "session": "wt-web-app-fix-login-timeout",
+    "listed": true,
+    "path": "~/worktrees/web-app/fix-login-timeout",
+    "base": null,
+    "launch": null
+  }
+}

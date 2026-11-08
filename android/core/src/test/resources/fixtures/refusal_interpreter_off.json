@@ -1,0 +1,8 @@
+{
+  "status": 409,
+  "headers": {},
+  "body": {
+    "error": "The worktree interpreter is not set up yet, so a request cannot be turned into a repo and a branch.",
+    "reason": "interpreter_off"
+  }
+}

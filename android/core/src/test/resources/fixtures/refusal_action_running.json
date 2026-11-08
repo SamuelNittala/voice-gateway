@@ -1,0 +1,8 @@
+{
+  "status": 409,
+  "headers": {},
+  "body": {
+    "error": "Another action on this session is still running.",
+    "reason": "action_running"
+  }
+}

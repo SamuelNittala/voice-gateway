@@ -1,0 +1,8 @@
+{
+  "status": 409,
+  "headers": {},
+  "body": {
+    "error": "There is unsent text in the box at the Mac, so I did not send this. That text was left as it is.",
+    "reason": "draft_present"
+  }
+}

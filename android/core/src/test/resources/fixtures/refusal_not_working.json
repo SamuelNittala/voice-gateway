@@ -1,0 +1,9 @@
+{
+  "status": 409,
+  "headers": {},
+  "body": {
+    "error": "The orchestrator is idle, so I did not send stop.",
+    "reason": "not_working",
+    "status": "idle"
+  }
+}

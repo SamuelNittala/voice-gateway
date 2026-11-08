@@ -1,0 +1,8 @@
+{
+  "status": 404,
+  "headers": {},
+  "body": {
+    "error": "No such plan. Plan again.",
+    "reason": "plan_gone"
+  }
+}

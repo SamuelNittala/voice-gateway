@@ -1,0 +1,25 @@
+{
+  "status": 200,
+  "headers": {},
+  "body": {
+    "ok": true,
+    "session": "wt-web-app-fix-login-timeout",
+    "listed": true,
+    "path": "~/worktrees/web-app/fix-login-timeout",
+    "base": {
+      "ref": "origin/main",
+      "sha": "2cd9c8f",
+      "subject": "first commit",
+      "fetched": true,
+      "moved": false,
+      "planned_sha": "2cd9c8f"
+    },
+    "launch": {
+      "model": "claude-opus-5-5",
+      "effort": "high",
+      "playbook": true,
+      "settings": false,
+      "trust": "written"
+    }
+  }
+}

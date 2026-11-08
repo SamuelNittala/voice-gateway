@@ -1,0 +1,21 @@
+{
+  "status": 200,
+  "headers": {},
+  "body": {
+    "kind": "ask",
+    "understood": true,
+    "question": "Which repo did you mean?",
+    "candidates": [
+      {
+        "id": "85dfc701aea8",
+        "name": "web-app",
+        "where": "code"
+      },
+      {
+        "id": "c4cfe063a1bc",
+        "name": "notes",
+        "where": "code/group"
+      }
+    ]
+  }
+}

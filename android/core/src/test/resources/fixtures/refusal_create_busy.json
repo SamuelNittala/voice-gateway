@@ -1,0 +1,8 @@
+{
+  "status": 409,
+  "headers": {},
+  "body": {
+    "error": "Another worktree is still being created.",
+    "reason": "create_busy"
+  }
+}

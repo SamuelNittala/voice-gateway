@@ -1,0 +1,8 @@
+{
+  "status": 502,
+  "headers": {},
+  "body": {
+    "error": "Herdr did not answer. The text may have arrived: check the output first.",
+    "reason": "herdr_timeout_maybe_sent"
+  }
+}

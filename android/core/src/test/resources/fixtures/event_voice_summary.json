@@ -1,0 +1,49 @@
+{
+  "status": 200,
+  "headers": {},
+  "body": {
+    "name": "wt-scratch",
+    "state": "running",
+    "agents": [
+      {
+        "name": "claude",
+        "kind": "claude",
+        "pane_label": "",
+        "status": "idle",
+        "orchestrator": true
+      }
+    ],
+    "orchestrator": {
+      "name": "claude",
+      "kind": "claude",
+      "status": "idle",
+      "pane_label": ""
+    },
+    "problem": "",
+    "output": "orchestrator output",
+    "screen_token": null,
+    "draft": "unknown",
+    "actions": {
+      "prompt": true,
+      "keys": [],
+      "stop": false,
+      "restart": false
+    },
+    "events": [
+      {
+        "id": "000000000000001a",
+        "kind": "summary",
+        "session": "wt-scratch",
+        "worktree": "scratch",
+        "text": "Fixed it. Want me to run the tests?"
+      }
+    ],
+    "waiting": [],
+    "voice": "browser",
+    "voices": [],
+    "local": {
+      "configured": false,
+      "reason": "Local speech is not set up."
+    }
+  }
+}

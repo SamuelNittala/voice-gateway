@@ -1,0 +1,11 @@
+{
+  "status": 429,
+  "headers": {
+    "Retry-After": "51"
+  },
+  "body": {
+    "error": "Too many recordings in a minute. Try again in 51 seconds.",
+    "reason": "transcribe_rate",
+    "retry_after": 51
+  }
+}

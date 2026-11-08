@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- The voice loop keeps running with the screen off: plan section 6. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- The look-at-the-phone cue for confirmations and dialogs. -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+
+    <!-- Backup and device transfer exclude everything (secrets, cookie, settings): plan section 1. -->
+    <!-- network_security_config: no cleartext in release; src/debug overrides it for development. -->
+    <application
+        android:name=".VoiceGatewayApplication"
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:label="Voice Gateway"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.VoiceGateway">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Started only from a tap in the visible app (Android 14+), never restarted by the system (START_NOT_STICKY).
+             The notification channel is created in code (VoiceGatewayApplication), as Android requires. -->
+        <service
+            android:name=".service.VoiceLoopService"
+            android:exported="false"
+            android:foregroundServiceType="microphone|mediaPlayback" />
+    </application>
+
+</manifest>

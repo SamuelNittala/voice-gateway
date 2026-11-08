@@ -1,0 +1,11 @@
+{
+  "status": 429,
+  "headers": {
+    "Retry-After": "2"
+  },
+  "body": {
+    "error": "A recording is already being turned into text.",
+    "reason": "transcribe_busy",
+    "retry_after": 2
+  }
+}

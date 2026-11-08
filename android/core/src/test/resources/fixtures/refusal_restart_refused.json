@@ -1,0 +1,8 @@
+{
+  "status": 409,
+  "headers": {},
+  "body": {
+    "error": "No saved state for wt-scratch, so its folder is unknown.",
+    "reason": "restart_refused"
+  }
+}

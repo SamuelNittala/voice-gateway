@@ -1,0 +1,8 @@
+{
+  "status": 502,
+  "headers": {},
+  "body": {
+    "error": "wt new failed: wt: failed to start the session",
+    "reason": "wt_failed"
+  }
+}

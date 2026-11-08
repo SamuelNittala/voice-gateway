@@ -1,0 +1,8 @@
+{
+  "status": 400,
+  "headers": {},
+  "body": {
+    "error": "The recording is empty.",
+    "reason": "audio_empty"
+  }
+}

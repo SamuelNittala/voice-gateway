@@ -1,0 +1,8 @@
+{
+  "status": 400,
+  "headers": {},
+  "body": {
+    "error": "The plan id is missing.",
+    "reason": "bad_plan"
+  }
+}

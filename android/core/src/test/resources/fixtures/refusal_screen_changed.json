@@ -1,0 +1,10 @@
+{
+  "status": 409,
+  "headers": {},
+  "body": {
+    "error": "The screen changed, so I did not send the key. Look at it again.",
+    "reason": "screen_changed",
+    "output": "Do you want to make this edit?\n❯ 1. Yes\n  2. No\n",
+    "screen_token": "7975a1135b82cbb9fd34950348aef2ec"
+  }
+}

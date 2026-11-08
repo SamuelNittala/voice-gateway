@@ -1,0 +1,22 @@
+{
+  "status": 200,
+  "headers": {},
+  "body": {
+    "kind": "ask",
+    "understood": false,
+    "question": "I couldn't understand that. Try again, or pick a repo.",
+    "reason": "the answer was not strict JSON",
+    "candidates": [
+      {
+        "id": "c4cfe063a1bc",
+        "name": "notes",
+        "where": "code/group"
+      },
+      {
+        "id": "85dfc701aea8",
+        "name": "web-app",
+        "where": "code"
+      }
+    ]
+  }
+}
