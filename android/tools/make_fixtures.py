@@ -113,6 +113,12 @@ class World:
     def reply(self, line, echo="what is 2"):
         self.session.visible = f"> {echo}\n\n⏺ SPOKEN[{self.nonce()}]: {line}\n\n───\n❯ \n───\n"
 
+    def progress(self, lines, echo="fix it"):
+        """The agent is still working and has written these progress lines below the echo."""
+        self.session.agents[0]["agent_status"] = "working"
+        written = "\n\n".join(f"⏺ PROGRESS[{self.nonce()}]: {line}" for line in lines)
+        self.session.visible = f"> {echo}\n\n{written}\n\n✻ Working…\n"
+
     def view(self):
         return self.get(f"/api/session?name={SCRATCH}")
 
@@ -587,6 +593,23 @@ def tap_confirmation():
     w.close()
 
 
+# ---------------------------------------------------------------- progress updates (last, so earlier ids stay put)
+
+def progress():
+    w = World()  # A voice prompt still working, with one progress line on screen.
+    w.prompt("fix it", voice=True)
+    w.progress(["Reading the failing test"])
+    answer = w.view()
+    assert [e["kind"] for e in json.loads(answer[1])["events"]] == ["progress"], answer
+    write("event_progress", answer)
+    w.session.agents[0]["agent_status"] = "idle"  # Then the reply: the unheard progress line is dropped.
+    w.session.visible += f"\n⏺ SPOKEN[{w.nonce()}]: Fixed the test. Want me to run the rest?\n"
+    answer = w.view()
+    assert [e["kind"] for e in json.loads(answer[1])["events"]] == ["summary"], answer
+    write("event_progress_then_summary", answer)
+    w.close()
+
+
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
     for old in OUT.glob("*.json"):
@@ -599,6 +622,7 @@ def main():
     guards()
     worktrees()
     tap_confirmation()
+    progress()
     names = sorted(p.name for p in OUT.glob("*.json"))
     print(f"{len(names)} fixtures in {OUT.relative_to(REPO)}:")
     for name in names:

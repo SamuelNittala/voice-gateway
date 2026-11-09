@@ -10,6 +10,7 @@ import dev.nittala.voicegateway.core.api.GatewayApi
 import dev.nittala.voicegateway.core.api.Refusal
 import dev.nittala.voicegateway.core.api.RefusalReason
 import dev.nittala.voicegateway.core.loop.Effect
+import dev.nittala.voicegateway.core.loop.LoopConfig
 import dev.nittala.voicegateway.core.loop.LoopInput
 import dev.nittala.voicegateway.core.loop.LoopState
 import dev.nittala.voicegateway.core.loop.MicFailure
@@ -17,6 +18,7 @@ import dev.nittala.voicegateway.core.loop.Phase
 import dev.nittala.voicegateway.core.loop.Timer
 import dev.nittala.voicegateway.core.loop.TranscribeFailure
 import dev.nittala.voicegateway.core.loop.VoiceLoop
+import dev.nittala.voicegateway.core.loop.WORKING_CUE_MS
 import dev.nittala.voicegateway.core.model.Event
 import dev.nittala.voicegateway.core.model.PlanAnswer
 import dev.nittala.voicegateway.core.model.SessionView
@@ -54,6 +56,9 @@ interface LoopControls : LoopInputs {
     /** The app became visible or hidden (polling of the sessions list, the loop's AppVisible). */
     fun setVisible(visible: Boolean)
 }
+
+/** The app's loop numbers: [LoopConfig]'s, with the working cue on ([WORKING_CUE_MS]). */
+val APP_LOOP_CONFIG = LoopConfig(workingCueMs = WORKING_CUE_MS)
 
 /**
  * Pure: the detector settings the controller starts capture with. The detector's own no-speech timeout is switched

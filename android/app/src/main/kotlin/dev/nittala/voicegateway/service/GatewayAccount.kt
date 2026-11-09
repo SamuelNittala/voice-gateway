@@ -69,6 +69,7 @@ class GatewayAccount(
         val url = settings.baseUrl()
         links.connect(url)
         _login.update { it.copy(baseUrl = url.orEmpty(), rememberPasscode = settings.isRememberPasscodeOn()) }
+        loop.send(LoopInput.ProgressChanged(settings.isSpokenProgressOn()))
         url != null && cookies.get() != null
     }
 
@@ -134,6 +135,10 @@ class GatewayAccount(
     override fun setRememberPasscode(on: Boolean) {
         _login.update { it.copy(rememberPasscode = on) }
         scope.launch { withContext(io) { settings.setRememberPasscode(on) } }
+    }
+
+    override fun setSpokenProgress(on: Boolean) {
+        scope.launch { withContext(io) { settings.setSpokenProgress(on) } }
     }
 
     fun silentRelogin() {

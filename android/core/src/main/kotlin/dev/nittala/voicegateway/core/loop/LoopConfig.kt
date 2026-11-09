@@ -9,6 +9,9 @@ import dev.nittala.voicegateway.core.speech.DetectorConfig
  */
 const val HANDOFF_FIRST_PROMPT = false
 
+/** The app's working cue: one soft tick every 15 s while the agent works, the first 15 s after the send. */
+const val WORKING_CUE_MS = 15_000L
+
 /** The loop's fixed numbers (plan sections 2, 3, 5, 7). Not user settings, so they are not loosened casually. */
 data class LoopConfig(
     val listenSilenceMs: Long = 45_000,
@@ -33,4 +36,6 @@ data class LoopConfig(
     val handoffLimitMs: Long = 120_000,
     /** W6: settled views in a row before the first prompt goes. */
     val handoffSettledViews: Int = 2,
+    /** The working cue's period in AgentWorking ([WORKING_CUE_MS] in the app); null: no cue. */
+    val workingCueMs: Long? = null,
 )

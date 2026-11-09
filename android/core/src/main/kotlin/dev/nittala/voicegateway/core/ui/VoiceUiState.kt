@@ -217,11 +217,15 @@ data class LoginUiState(
     val variant: BuildVariant = BuildVariant.RELEASE,
 )
 
-/** The Settings screen. Remember passcode is off by default; [speaker] null means the gateway default. */
+/**
+ * The Settings screen. Remember passcode is off by default; [speaker] null means the gateway default;
+ * [spokenProgress] ("Speak progress updates") is on by default.
+ */
 data class SettingsUiState(
     val baseUrl: String = "",
     val rememberPasscode: Boolean = false,
     val muted: Boolean = false,
     val speaker: Engine? = null,
     val variant: BuildVariant = BuildVariant.RELEASE,
+    val spokenProgress: Boolean = true,
 )

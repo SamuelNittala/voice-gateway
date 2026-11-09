@@ -7243,12 +7243,22 @@ DESTRUCTIVE_WORDS = frozenset(("delete remove rm overwrite force push drop reset
                                "publish pay purchase charge").split())
 
 
+# Progress updates (approved 2026-11-09): voice and tap prompts only, between the clause and "End your reply".
+PROGRESS_CLAUSE = (
+    "While you work on a task that takes more than a minute, you may write a short progress line for the ear, at "
+    "most twelve plain words, no code, paths or file names, never a question, on its own line in exactly this form: "
+    "PROGRESS[{nonce}]: what you are doing now. Write one only when you start a new long step, at most five in all, "
+    "and never put that tag in files, commands or tool input. ")
+
+
 def voice_instruction(nonce):
-    return VOICE_CLAUSE + TODAYS_INSTRUCTION.format(nonce=nonce).split("Sent from my phone. ", 1)[1]
+    return (VOICE_CLAUSE + PROGRESS_CLAUSE.format(nonce=nonce)
+            + TODAYS_INSTRUCTION.format(nonce=nonce).split("Sent from my phone. ", 1)[1])
 
 
 def tap_instruction(nonce):
-    return TAP_CLAUSE + TODAYS_INSTRUCTION.format(nonce=nonce).split("Sent from my phone. ", 1)[1]
+    return (TAP_CLAUSE + PROGRESS_CLAUSE.format(nonce=nonce)
+            + TODAYS_INSTRUCTION.format(nonce=nonce).split("Sent from my phone. ", 1)[1])
 
 
 class VoiceInstructionTests(unittest.TestCase):
@@ -7505,6 +7515,330 @@ class HttpVoiceAskTests(HttpCase):
         status, _, body, _ = self.post("/api/prompt", {"session": SCRATCH, "text": "hi", "voice": "yes"})
         self.assertEqual((status, json.loads(body)["reason"]), (400, "bad_text"))
         self.assertEqual(self.runner.named("agent", "prompt"), [])
+
+
+# ---------------------------------------------------------------- Android app: progress updates (P1)
+
+PTAG = f"PROGRESS[{NONCE}]:"
+
+
+class ProgressConstantTests(unittest.TestCase):
+    def test_caps(self):
+        self.assertEqual(g.PROGRESS_PLACEHOLDER, "what you are doing now")
+        self.assertEqual(g.MAX_PROGRESS_CHARS, 100)
+        self.assertEqual(g.MAX_PROGRESS_EVENTS, 5)
+        self.assertEqual(g.PROGRESS_MIN_GAP_SECONDS, 20)
+        self.assertEqual(g.PROGRESS_READ_SECONDS, 4)
+
+
+class FindProgressTests(unittest.TestCase):
+    def find(self, screen, nonce=NONCE):
+        return g.find_progress(screen, nonce)
+
+    def test_lines_in_screen_order(self):
+        screen = f"⏺ {PTAG} Reading the tests\n\n⏺ Bash(ls)\n  ⎿ out\n\n⏺ {PTAG} Running the suite\n"
+        self.assertEqual(self.find(screen), ["Reading the tests", "Running the suite"])
+
+    def test_markers_and_whitespace(self):
+        for line in (PTAG, f"  {PTAG}", f"● {PTAG}", f"• {PTAG}", f"- {PTAG}", f"* {PTAG}", f"  ⏺  {PTAG}"):
+            self.assertEqual(self.find(f"{line} Fixing the login bug\n"), ["Fixing the login bug"], line)
+
+    def test_continuation_is_joined(self):
+        screen = f"⏺ {PTAG} Checking the parser and then\n  the lexer as well\n\n⏺ more\n"
+        self.assertEqual(self.find(screen), ["Checking the parser and then the lexer as well"])
+
+    def test_text_on_the_next_line(self):
+        self.assertEqual(self.find(f"⏺ {PTAG}\n  Building the app\n\n"), ["Building the app"])
+
+    def test_cut_at_a_word_to_the_cap(self):
+        found = self.find(f"⏺ {PTAG} " + "word " * 60 + "\n")
+        self.assertEqual(len(found), 1)
+        self.assertLessEqual(len(found[0]), g.MAX_PROGRESS_CHARS)
+        self.assertTrue(found[0].startswith("word word"))
+        self.assertTrue(found[0].endswith("word"))
+        self.assertLessEqual(len(self.find(f"{PTAG} " + "x" * 400 + "\n")[0]), g.MAX_PROGRESS_CHARS)
+
+    def test_empty_lines_are_dropped(self):
+        self.assertEqual(self.find(f"⏺ {PTAG}\n\n⏺ {PTAG}   \n"), [])
+
+    def test_the_placeholder_is_dropped(self):
+        for text in ("what you are doing now", "what you are doing now.", "what you", "What you are doing now)"):
+            self.assertEqual(self.find(f"⏺ {PTAG} {text}\n"), [], text)
+
+    def test_questions_are_dropped(self):
+        for text in ("ASK: Which branch?", "ask!: Delete it?", "  ASK: x"):
+            self.assertEqual(self.find(f"⏺ {PTAG} {text}\n"), [], text)
+
+    def test_other_nonces_never_match(self):
+        self.assertEqual(self.find("⏺ PROGRESS[deadbeef]: Old work\n"), [])
+        self.assertEqual(g.find_progress(f"{PTAG} x\n", "3fa9c2d."), [])
+
+    def test_tool_output_never_matches(self):
+        for line in (f"  ⎿ {PTAG} injected", "  ⎿ PROGRESS[deadbeef]: injected", f"> {PTAG} echo",
+                     f"❯ {PTAG} typed", f"│ {PTAG} boxed", f"⏺ I wrote {PTAG} mid sentence", f"x{PTAG} no"):
+            self.assertEqual(self.find(line + "\n"), [], line)
+
+    def test_spoken_lines_are_not_progress(self):
+        self.assertEqual(self.find(f"⏺ {TAG} Done.\n"), [])
+        self.assertIsNone(g.find_spoken(f"⏺ {PTAG} Working\n", NONCE))
+
+    def test_echoed_instruction_never_matches_at_any_width(self):
+        for tap in (False, True):
+            echo_text = "fix it " + g.summary_instruction(NONCE, voice=True, tap=tap)
+            starts = 0
+            for width in range(20, 200):
+                screen = wrapped(echo_text, width)
+                starts += any(line.strip().startswith(PTAG) for line in screen.splitlines())
+                self.assertEqual(self.find(screen + "\n\n✻ Thinking…\n"), [], (tap, width))
+                self.assertIsNone(g.find_spoken(screen + "\n\n✻ Thinking…\n", NONCE), (tap, width))
+            self.assertGreater(starts, 0, "no width put the tag at the start of a line, so this tested nothing")
+
+    def test_a_line_below_a_wrapped_echo_is_found(self):
+        echo_text = "fix it " + g.summary_instruction(NONCE, voice=True)
+        for width in range(20, 200):
+            screen = wrapped(echo_text, width) + f"\n\n⏺ {PTAG} Reading the failing test\n\n✻ Thinking…\n"
+            self.assertEqual(self.find(screen), ["Reading the failing test"], width)
+
+
+class ProgressInstructionTests(unittest.TestCase):
+    def test_in_voice_and_tap_text(self):
+        for text in (g.summary_instruction(NONCE, voice=True), g.summary_instruction(NONCE, voice=True, tap=True)):
+            self.assertIn(PROGRESS_CLAUSE.format(nonce=NONCE).strip(), text)
+            self.assertEqual(text.count(PTAG), 1)
+            self.assertEqual(len(text.splitlines()), 1)
+            self.assertTrue(text.endswith(f"{TAG} {g.SPOKEN_PLACEHOLDER})"))
+            self.assertLess(text.index(PTAG), text.index("End your reply"))
+
+    def test_not_in_typed_text(self):
+        for text in (g.summary_instruction(NONCE), g.summary_instruction(NONCE, voice=False, tap=True)):
+            self.assertEqual(text, TODAYS_INSTRUCTION.format(nonce=NONCE))
+            self.assertNotIn("PROGRESS", text)
+
+    def test_clause_follows_the_voice_or_tap_clause(self):
+        voice = g.summary_instruction(NONCE, voice=True)
+        self.assertLess(voice.index("so ask again with ASK!:."), voice.index("While you work"))
+        tap = g.summary_instruction(NONCE, voice=True, tap=True)
+        self.assertLess(tap.index("ASK: or ASK!: as before."), tap.index("While you work"))
+
+    def test_clause_names_the_caps(self):
+        text = g.summary_instruction(NONCE, voice=True)
+        for words in ("twelve plain words", "never a question", "at most five", f"{PTAG} {g.PROGRESS_PLACEHOLDER}.",
+                      "never put that tag in files, commands or tool input"):
+            self.assertIn(words, text)
+
+
+class ProgressAnnouncementTests(GatewayCase):
+    def setUp(self):
+        super().setUp()
+        self.session = self.runner.sessions[SCRATCH]
+        self.lines = []
+
+    def send(self, text="fix it", voice=True):
+        self.app.prompt({"session": SCRATCH, "text": text, "voice": voice})
+        self.lines = []
+
+    def nonce(self):
+        sent = self.runner.named("agent", "prompt")[-1]["argv"][-1]
+        return re.search(r"SPOKEN\[([0-9a-f]+)\]", sent).group(1)
+
+    def write(self, *texts):
+        """The agent writes progress lines; the screen keeps what it wrote before."""
+        self.lines += [f"⏺ PROGRESS[{self.nonce()}]: {text}" for text in texts]
+        self.session.visible = "> fix it\n\n" + "\n\n".join(self.lines) + "\n\n✻ Working…\n"
+
+    def events(self):
+        return self.app.sessions_view()["events"]
+
+    def progress(self):
+        return [e["text"] for e in self.events() if e["kind"] == "progress"]
+
+    def later(self, seconds=None):
+        self.clock.t += g.PROGRESS_MIN_GAP_SECONDS + 1 if seconds is None else seconds
+
+    def screen_reads(self):
+        return [c["argv"] for c in self.runner.named("agent", "read") if "ansi" not in c["argv"]]
+
+    def working(self):
+        self.send()
+        self.set_status("working")
+
+    def test_one_event_per_new_line(self):
+        self.working()
+        self.write("Reading the tests")
+        events = self.events()
+        self.assertEqual(len(events), 1)
+        event = events[0]
+        self.assertEqual((event["kind"], event["text"], event["session"], event["worktree"]),
+                         ("progress", "Reading the tests", SCRATCH, "scratch"))
+        self.assertEqual(set(event), {"id", "kind", "session", "worktree", "text"})
+        self.assertEqual(self.app.sessions_view()["waiting"], [SCRATCH])  # Not a final event.
+        self.assertFalse(self.app.announcer.pending[SCRATCH].announced)
+
+    def test_a_line_still_on_screen_is_made_once(self):
+        self.working()
+        self.write("Reading the tests")
+        first = self.events()
+        self.later()
+        self.assertEqual(self.events(), first)
+        self.app.acknowledge({"ids": [first[0]["id"]]})
+        self.later()
+        self.assertEqual(self.events(), [])
+
+    def test_lines_closer_than_the_gap_are_skipped_for_good(self):
+        self.working()
+        self.write("Reading the tests")
+        self.assertEqual(self.progress(), ["Reading the tests"])
+        self.later(g.PROGRESS_READ_SECONDS + 1)
+        self.write("Running the suite")
+        self.assertEqual(self.progress(), ["Reading the tests"])
+        self.later()
+        self.assertEqual(self.progress(), ["Reading the tests"])  # Never replayed later.
+        self.write("Fixing the parser")
+        self.later(g.PROGRESS_READ_SECONDS + 1)
+        self.assertEqual(self.progress(), ["Reading the tests", "Fixing the parser"])
+
+    def test_only_the_newest_fresh_line_is_made(self):
+        self.working()
+        self.write("Reading the tests", "Running the suite", "Fixing the parser")
+        self.assertEqual(self.progress(), ["Fixing the parser"])
+
+    def test_at_most_five_per_send(self):
+        self.working()
+        for index in range(8):
+            self.write(f"Step number {index}")
+            self.events()
+            self.later()
+        self.assertEqual(self.progress(), [f"Step number {index}" for index in range(5)])
+        self.assertEqual(self.app.announcer.pending[SCRATCH].progress_count, 5)
+
+    def test_typed_prompts_read_nothing_while_working(self):
+        self.send(voice=False)
+        self.set_status("working")
+        self.write("Reading the tests")
+        before = len(self.screen_reads())
+        self.events()
+        self.later()
+        self.events()
+        self.assertEqual(self.progress(), [])
+        self.assertEqual(len(self.screen_reads()), before)
+
+    def test_commands_read_nothing_while_working(self):
+        self.app.prompt({"session": SCRATCH, "text": "/compact", "voice": False})
+        self.set_status("working")
+        before = len(self.screen_reads())
+        self.events()
+        self.assertEqual(len(self.screen_reads()), before)
+
+    def test_reads_are_throttled(self):
+        self.working()
+        self.write("Reading the tests")
+        before = len(self.screen_reads())
+        self.events()
+        self.events()
+        self.later(g.PROGRESS_READ_SECONDS - 1)
+        self.events()
+        self.assertEqual(len(self.screen_reads()), before + 1)
+        self.later(2)
+        self.events()
+        self.assertEqual(len(self.screen_reads()), before + 2)
+        self.assertEqual(self.screen_reads()[-1][5:], ["w1:p1", "--source", "visible", "--lines", "40"])
+
+    def test_nothing_read_while_blocked(self):
+        self.working()
+        self.write("Reading the tests")
+        self.set_status("blocked")
+        before = len(self.screen_reads())
+        self.events()
+        self.assertEqual(len(self.screen_reads()), before)
+        self.assertEqual([e["kind"] for e in self.events()], ["needs-you"])
+
+    def test_a_final_event_drops_unacknowledged_progress(self):
+        self.working()
+        self.write("Reading the tests")
+        self.assertEqual(self.progress(), ["Reading the tests"])
+        self.set_status("idle")
+        self.session.visible += f"\n⏺ SPOKEN[{self.nonce()}]: All fixed.\n"
+        self.assertEqual([(e["kind"], e["text"]) for e in self.events()], [("summary", "All fixed.")])
+
+    def test_check_screen_drops_unacknowledged_progress(self):
+        self.working()
+        self.write("Reading the tests")
+        self.events()
+        self.set_status("idle")
+        self.later(g.SETTLE_SECONDS + 1)
+        self.events()
+        self.later(g.SETTLE_SECONDS + 1)
+        self.assertEqual([e["kind"] for e in self.events()], ["check-screen"])
+
+    def test_a_new_send_drops_unacknowledged_progress(self):
+        self.working()
+        self.write("Reading the tests")
+        self.assertEqual(self.progress(), ["Reading the tests"])
+        self.set_status("idle")
+        self.later(g.PROMPT_REPEAT_SECONDS + 1)
+        self.send("and the docs")
+        self.assertEqual(self.app.announcer.unacknowledged(), [])
+
+    def test_other_sessions_progress_is_kept(self):
+        self.working()
+        self.write("Reading the tests")
+        self.events()
+        other = dict(self.app.announcer.unacknowledged()[0], id="ffffffffffffffff", session="wt-other")
+        self.app.announcer.events[other["id"]] = other
+        self.set_status("idle")
+        self.session.visible += f"\n⏺ SPOKEN[{self.nonce()}]: All fixed.\n"
+        self.assertEqual(sorted((e["session"], e["kind"]) for e in self.events()),
+                         [("wt-other", "progress"), (SCRATCH, "summary")])
+
+    def test_a_question_is_never_progress(self):
+        self.working()
+        self.write("ASK: Shall I delete it?")
+        self.assertEqual(self.events(), [])
+
+    def test_progress_never_carries_ask(self):
+        self.working()
+        self.write("Asking around the codebase")
+        self.assertNotIn("ask", self.events()[0])
+
+    def test_settled_screen_makes_no_progress(self):
+        self.send()
+        self.write("Reading the tests")
+        self.session.visible += f"\n⏺ SPOKEN[{self.nonce()}]: Done.\n"
+        self.assertEqual([e["kind"] for e in self.events()], ["summary"])
+
+    def test_the_echo_alone_makes_no_progress(self):
+        self.working()
+        sent = self.runner.named("agent", "prompt")[-1]["argv"][-1]
+        for width in (40, 60, 80, 120):
+            self.session.visible = wrapped(sent, width) + "\n\n✻ Working…\n"
+            self.events()
+            self.later(g.PROGRESS_READ_SECONDS + 1)
+        self.assertEqual(self.events(), [])
+
+    def test_a_line_from_an_older_send_is_ignored(self):
+        self.working()
+        old = self.nonce()
+        self.set_status("idle")
+        self.later(g.PROMPT_REPEAT_SECONDS + 1)
+        self.send("next")
+        self.set_status("working")
+        self.session.visible = f"⏺ PROGRESS[{old}]: Old step\n"
+        self.assertEqual(self.events(), [])
+
+    def test_tap_confirmations_get_progress(self):
+        self.app.prompt({"session": SCRATCH, "text": "yes", "voice": True, "confirm": "tap"})
+        self.set_status("working")
+        self.write("Deleting the branch")
+        self.assertEqual(self.progress(), ["Deleting the branch"])
+
+
+class ProgressPageTests(unittest.TestCase):
+    def test_the_page_neither_speaks_nor_acknowledges_progress(self):
+        source = (ROOT / "static" / "app.js").read_text()
+        body = source[source.index("function announce"):source.index("function speakWords")]
+        skip = body.index('if (event.kind === "progress") continue;')
+        self.assertLess(skip, body.index("announced.has(event.id)"))
+        self.assertLess(skip, body.index("announced.add(event.id)"))
 
 
 if __name__ == "__main__":

@@ -51,6 +51,29 @@ class ServerMirrorTest {
         assertTrue(source.contains("""tap = voice and payload.get("confirm") == "tap""""))
     }
 
+    /** Progress updates: the event kind, the caps and the approved instruction wording, on both sides. */
+    @Test
+    fun progressLinesMatchTheServer() {
+        assertTrue(source.contains("""self._add(record, "progress", fresh[-1])"""))
+        assertEquals("progress", dev.nittala.voicegateway.core.model.EventKind.Progress.wire)
+        assertTrue(source.contains("MAX_PROGRESS_CHARS = ${dev.nittala.voicegateway.core.model.ProgressLine.MAX_CHARS}\n"))
+        assertTrue(source.contains("MAX_PROGRESS_EVENTS = ${dev.nittala.voicegateway.core.model.ProgressLine.MAX_PER_SEND}  "))
+        assertTrue(source.contains("PROGRESS_MIN_GAP_SECONDS = ${dev.nittala.voicegateway.core.model.ProgressLine.MIN_GAP_SECONDS}\n"))
+        assertTrue(source.contains("PROGRESS_PLACEHOLDER = \"what you are doing now\"\n"))
+        val flat = source.replace(Regex("\"\\s*\n\\s*f?\""), "")
+        assertTrue(flat.contains(
+            "While you work on a task that takes more than a minute, you may write a short progress line for the ear, " +
+                "at most twelve plain words, no code, paths or file names, never a question, on its own line in exactly " +
+                "this form: PROGRESS[{nonce}]: {PROGRESS_PLACEHOLDER}. Write one only when you start a new long step, at " +
+                "most five in all, and never put that tag in files, commands or tool input.",
+        ))
+        // Never a question: the server drops ASK lines, so the app never has to undo one.
+        assertTrue(source.contains("_ASK_RE.match(text) is None:"))
+        // Final events and new sends drop unheard progress lines on the server too.
+        assertTrue(source.contains("self._drop_progress(record.session)"))
+        assertTrue(source.contains("self._drop_progress(session)"))
+    }
+
     @Test
     fun noisePhrasesEqualTheServers() {
         val server = literals(body("VOICE_NOISE_PHRASES", """\((.*?)\)\n"""))

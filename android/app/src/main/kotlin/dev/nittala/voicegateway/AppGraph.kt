@@ -17,6 +17,7 @@ import dev.nittala.voicegateway.core.config.BuildVariant
 import dev.nittala.voicegateway.core.loop.LoopInput
 import dev.nittala.voicegateway.core.loop.LoopState
 import dev.nittala.voicegateway.core.loop.Phase
+import dev.nittala.voicegateway.core.loop.VoiceLoop
 import dev.nittala.voicegateway.core.speech.Engine
 import dev.nittala.voicegateway.core.ui.SettingsUiState
 import dev.nittala.voicegateway.net.ConnectivityNetworkMonitor
@@ -28,6 +29,7 @@ import dev.nittala.voicegateway.playback.ExoSpeaker
 import dev.nittala.voicegateway.playback.PhoneTtsSpeaker
 import dev.nittala.voicegateway.playback.PlaybackFocusRequester
 import dev.nittala.voicegateway.playback.TtsPhoneVoice
+import dev.nittala.voicegateway.service.APP_LOOP_CONFIG
 import dev.nittala.voicegateway.service.AndroidServiceControl
 import dev.nittala.voicegateway.service.AppActions
 import dev.nittala.voicegateway.service.GatewayAccount
@@ -113,6 +115,7 @@ class AppGraph(private val app: Application) {
         network = ConnectivityNetworkMonitor(app.getSystemService(ConnectivityManager::class.java)),
         scope = main,
         clock = System::currentTimeMillis,
+        loop = VoiceLoop(APP_LOOP_CONFIG),
         // DEBUG only: numbers and reason codes to logcat (tag VG) and the screen; release builds log nothing.
         debug = if (BuildConfig.DEBUG) { line -> Log.d(DEBUG_TAG, line) } else null,
     )
@@ -137,7 +140,7 @@ class AppGraph(private val app: Application) {
 
     val settingsState: StateFlow<SettingsUiState> =
         combine(account.loginState, controller.state, controller.speakerChoice) { login, loop, speaker ->
-            SettingsUiState(login.baseUrl, login.rememberPasscode, loop.muted, speaker, variant)
+            SettingsUiState(login.baseUrl, login.rememberPasscode, loop.muted, speaker, variant, loop.spokenProgress)
         }.stateIn(main, SharingStarted.Eagerly, SettingsUiState(variant = variant))
 
     fun start() {

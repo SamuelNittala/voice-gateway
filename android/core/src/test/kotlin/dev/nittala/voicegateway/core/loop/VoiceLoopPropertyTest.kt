@@ -84,6 +84,7 @@ class VoiceLoopPropertyTest {
         LoopInput.SendNowTap -> "SendNowTap"
         LoopInput.DiscardTap -> "DiscardTap"
         is LoopInput.MuteChanged -> "MuteChanged"
+        is LoopInput.ProgressChanged -> "ProgressChanged"
         is LoopInput.AppVisible -> "AppVisible"
         LoopInput.AppStopped -> "AppStopped"
         is LoopInput.TimerFired -> "TimerFired"
@@ -149,7 +150,7 @@ class VoiceLoopPropertyTest {
         LoopInput.StopTap, LoopInput.RestartTap, LoopInput.KeyTap("1"),
         LoopInput.KeyRefused(WT, refusal(RefusalReason.ScreenChanged, screenToken = "t2", output = "o")),
         LoopInput.ConfirmTap(true), LoopInput.ConfirmTap(false), LoopInput.SendNowTap, LoopInput.DiscardTap,
-        LoopInput.MuteChanged(true), LoopInput.AppVisible(false), LoopInput.AppStopped,
+        LoopInput.MuteChanged(true), LoopInput.ProgressChanged(false), LoopInput.AppVisible(false), LoopInput.AppStopped,
         LoopInput.MicFailed(MicFailure.Silenced), LoopInput.MicFailed(MicFailure.Unavailable), LoopInput.TypedSend(TEXT),
     ) + flowInputs() + Timer.entries.map { LoopInput.TimerFired(it) }
 
@@ -165,7 +166,7 @@ class VoiceLoopPropertyTest {
     @Test
     fun theSamplesCoverEveryPhaseAndEveryInput() {
         assertEquals(16, samplePhases().map(::phaseName).toSet().size)
-        assertEquals(47, sampleInputs().map(::inputName).toSet().size)
+        assertEquals(48, sampleInputs().map(::inputName).toSet().size)
         val effects = listOf(
             Effect.StartCapture(false), Effect.StopCapture, Effect.FinishCapture, Effect.Upload(WT, GOOD),
             Effect.Send(WT, TEXT), Effect.Play(QUESTION, false), Effect.StopPlayback, Effect.Ack(listOf("e1")),
@@ -395,6 +396,89 @@ class VoiceLoopPropertyTest {
                 s = t.state
             }
         }
+    }
+
+    // ---- Progress updates: the working cue and progress lines -------------------------------------------------------
+
+    private val withCue = VoiceLoop(LoopConfig(workingCueMs = WORKING_CUE_MS))
+    private val progressPool = listOf(
+        progress("p1"), progress("p2", text = "Running the suite"), progress("p3", session = OTHER),
+        event("e1"), QUESTION, CONFIRM, event("n1", kind = EventKind.NeedsYou), event("o1", session = OTHER),
+    )
+
+    /** The usual inputs, plus views carrying progress lines and the setting being turned on and off. */
+    private fun Random.progressInput(s: LoopState): LoopInput {
+        val speaking = (s.phase as? Phase.Speaking)?.event?.id
+        return when (nextInt(10)) {
+            0, 1 -> LoopInput.View(
+                view(
+                    status = listOf("working", "working", "idle", "blocked").random(this),
+                    events = progressPool.filter { nextInt(4) == 0 },
+                    waiting = nextBoolean(),
+                    token = "tok${nextInt(2)}",
+                    name = if (nextInt(8) == 0) OTHER else s.worktree,
+                ),
+            )
+            2 -> LoopInput.ProgressChanged(nextInt(3) != 0)
+            3 -> if (speaking != null) LoopInput.PlaybackDone(speaking) else LoopInput.TimerFired(Timer.WorkingCue)
+            else -> input(s)
+        }
+    }
+
+    @Test
+    fun randomWalksKeepTheProgressRules() {
+        val random = Random(20261109)
+        var played = 0
+        var cues = 0
+        repeat(400) { walk ->
+            var s = LoopState(worktree = WT)
+            var mic = false
+            var timers = emptySet<Timer>()
+            repeat(200) {
+                val input = random.progressInput(s)
+                val t = withCue.step(s, input)
+                val where = "walk $walk: ${phaseName(s.phase)} x $input -> ${phaseName(t.phase)} ${t.effects}"
+                if (input is LoopInput.TimerFired) timers = timers - input.timer
+                for (e in t.effects) {
+                    when (e) {
+                        is Effect.StartCapture -> mic = true
+                        Effect.StopCapture -> mic = false
+                        is Effect.Say, is Effect.Play -> assertFalse("audio with the mic on: $where", mic)
+                        is Effect.StartTimer -> timers = timers + e.timer
+                        is Effect.CancelTimer -> timers = timers - e.timer
+                        else -> Unit
+                    }
+                    if (e is Effect.Play && e.event.kind == EventKind.Progress) {
+                        played++
+                        val now = t.phase as? Phase.Speaking
+                        assertEquals("progress played outside AgentWorking: $where", e.event, now?.event)
+                        assertTrue("progress played outside AgentWorking: $where", now!!.resume is Phase.AgentWorking)
+                        assertEquals("another worktree's progress: $where", t.state.worktree, e.event.session)
+                        assertTrue(where, t.state.spokenProgress && !t.state.muted)
+                    }
+                    if (e == Effect.Earcon(EarconKind.Working)) {
+                        cues++
+                        assertTrue("cue outside AgentWorking: $where", s.phase is Phase.AgentWorking && t.phase is Phase.AgentWorking)
+                    }
+                }
+                assertEquals("mic: $where", micOn(t.phase), mic)
+                val cue = if (t.phase is Phase.AgentWorking) setOf(Timer.WorkingCue) else emptySet()
+                assertEquals("timers: $where", expectedTimers(t.phase) + cue, timers)
+                assertTrue("a progress line became a question: $where", t.state.questions.values.none { it.kind == EventKind.Progress })
+                assertTrue("progress queued for later: $where", t.state.queue.none { it.kind == EventKind.Progress && !(t.phase is Phase.AgentWorking) })
+                val p = s.phase
+                if (p is Phase.Speaking && p.event.kind == EventKind.Progress && input == LoopInput.PlaybackDone(p.event.id) &&
+                    s.queue.isEmpty()
+                ) {
+                    assertTrue("a progress line opened the mic: $where", t.effects.none { it is Effect.StartCapture })
+                    assertTrue(where, t.phase is Phase.AgentWorking)
+                }
+                val keeps = t.phase is Phase.AgentWorking || (t.phase as? Phase.Speaking)?.resume is Phase.AgentWorking
+                if (!keeps) assertEquals("subtitle kept out of AgentWorking: $where", null, t.state.lastProgress)
+                s = t.state
+            }
+        }
+        assertTrue("walks too short to mean anything: $played lines, $cues cues", played > 50 && cues > 50)
     }
 
     // ---- W6: the new-worktree flow --------------------------------------------------------------------------------

@@ -8,6 +8,7 @@ import dev.nittala.voicegateway.core.loop.Effect.StartTimer
 import dev.nittala.voicegateway.core.model.AskKind
 import dev.nittala.voicegateway.core.model.Event
 import dev.nittala.voicegateway.core.model.EventKind
+import dev.nittala.voicegateway.core.model.ProgressLine
 import dev.nittala.voicegateway.core.model.SessionView
 import dev.nittala.voicegateway.core.speech.EnergyGate
 import dev.nittala.voicegateway.core.speech.TranscriptGuard
@@ -33,6 +34,12 @@ import dev.nittala.voicegateway.core.worktree.WorktreeLines
  *    stopped before the loop makes any sound and whenever it leaves Listening/AwaitingAnswer/Capturing; a phase's
  *    timers are cancelled when it is left; Say is dropped while muted; SetPoll follows [pollInterval].
  *
+ * Progress updates (VoiceLoopProgressTest): a [EventKind.Progress] event plays only in AgentWorking, for the current
+ * worktree, with [LoopState.spokenProgress] on, not muted and no later event of its session queued; any other is
+ * acknowledged silently in stage 2, never kept for later. After it the loop goes back to AgentWorking. A newer event
+ * of the current worktree interrupts it. The working cue ([LoopConfig.workingCueMs]) runs exactly while in
+ * AgentWorking: stage 3 starts it on entering, its firing plays Earcon(Working) and starts it again.
+ *
  * W6: [Phase.NewWorktree]'s own rules are [WorktreeFlowRules] (VoiceLoopWorktreeTest). Its captures go through
  * Capturing and Transcribing with a [CapturePurpose.Worktree], so the guards, the upload retries and every mic rule
  * above apply to them unchanged; their text goes back to the flow, never to the agent.
@@ -40,13 +47,16 @@ import dev.nittala.voicegateway.core.worktree.WorktreeLines
 class VoiceLoop(val config: LoopConfig = LoopConfig()) {
     private val flowRules = WorktreeFlowRules(config)
 
-    fun step(state: LoopState, input: LoopInput): Transition = finish(state, input, drain(dispatch(state, input)))
+    fun step(state: LoopState, input: LoopInput): Transition =
+        finish(state, input, dropProgress(drain(dropProgress(dispatch(state, input)))))
 
     /** Pure: the poll interval for a state (plan section 5); null means no polling. */
     fun pollInterval(state: LoopState): Long? = when (state.phase) {
         Phase.LoggedOut -> null
         Phase.Idle -> if (state.visible) config.slowPollMs else null
         is Phase.Sending, is Phase.AgentWorking, is Phase.NeedsYou -> config.fastPollMs
+        // A progress line keeps the working poll, so the reply that interrupts it is not heard late.
+        is Phase.Speaking -> if (state.phase.isProgress) config.fastPollMs else config.slowPollMs
         is Phase.NewWorktree -> if (state.phase.flow is WorktreeFlow.Handoff) config.fastPollMs else config.slowPollMs
         else -> config.slowPollMs
     }
@@ -55,7 +65,11 @@ class VoiceLoop(val config: LoopConfig = LoopConfig()) {
 
     private fun dispatch(s: LoopState, i: LoopInput): Transition {
         val p = s.phase
-        if (p == Phase.LoggedOut) return if (i == LoopInput.LoggedIn) Transition(s.copy(phase = Phase.Idle)) else Transition(s)
+        if (p == Phase.LoggedOut) return when (i) {
+            LoopInput.LoggedIn -> Transition(s.copy(phase = Phase.Idle))
+            is LoopInput.ProgressChanged -> Transition(s.copy(spokenProgress = i.spoken))
+            else -> Transition(s)
+        }
         return when (i) {
             LoopInput.Unauthorized -> Transition(s.copy(phase = Phase.LoggedOut), listOf(Effect.EndService))
             LoopInput.LoggedIn -> Transition(s)
@@ -65,8 +79,12 @@ class VoiceLoop(val config: LoopConfig = LoopConfig()) {
             LoopInput.HeadsetPress ->
                 if (p is Phase.NewWorktree && p.flow is WorktreeFlow.Card) Transition(s) else dispatch(s, LoopInput.Tap)
             LoopInput.HeadsetLongPress ->
-                dispatch(s, if (p is Phase.AgentWorking) LoopInput.StopTap else LoopInput.LongPress)
+                dispatch(s, if (p is Phase.AgentWorking || p.isProgress) LoopInput.StopTap else LoopInput.LongPress)
             LoopInput.StopTap -> Transition(s, listOf(Effect.SendStop(s.worktree)))
+            is LoopInput.ProgressChanged -> {
+                val set = s.copy(spokenProgress = i.spoken)
+                if (!i.spoken && p is Phase.Speaking && p.isProgress) finishPlayback(set, p, 0) else Transition(set)
+            }
             is LoopInput.MuteChanged -> {
                 val muted = s.copy(muted = i.muted)
                 if (i.muted && p is Phase.Speaking) finishPlayback(muted, p, 0) else Transition(muted)
@@ -286,7 +304,9 @@ class VoiceLoop(val config: LoopConfig = LoopConfig()) {
         is Phase.Capturing -> Transition(s.copy(phase = p.copy(purpose = expiredBack(p.purpose, s))))
         is Phase.AgentWorking -> {
             val sent = p.sent
-            if (sent == null) Transition(s.copy(phase = p.copy(settledTimer = false)))
+            if (timer == Timer.WorkingCue) {
+                Transition(s, listOf(Earcon(EarconKind.Working)) + listOfNotNull(cueStart()))
+            } else if (sent == null) Transition(s.copy(phase = p.copy(settledTimer = false)))
             else if (sent.maybeSent) held(s, sent.text, HeldReason.MaybeNotSent, Lines.MAYBE_NOT_SENT, sent.voice, sent.confirmTap)
             else listOf(Say(Lines.DONE_CHECK_SCREEN)).then(enterListening(s, 0))
         }
@@ -380,6 +400,11 @@ class VoiceLoop(val config: LoopConfig = LoopConfig()) {
             output = v.output,
         )
         val updated = s.copy(agent = agent, heard = heard, queue = kept + fresh)
+        // A newer event of this worktree interrupts a progress line; drain then plays it.
+        val p = s.phase
+        if (p is Phase.Speaking && p.isProgress && fresh.any { it.session == s.worktree && it.kind != EventKind.Progress }) {
+            return finishPlayback(updated, p, 0)
+        }
         // Events first (stage 2 plays them); status rules apply once nothing is waiting to be spoken.
         return if (v.name != s.worktree || playable(updated) != null) Transition(updated) else statusRules(updated)
     }
@@ -439,7 +464,7 @@ class VoiceLoop(val config: LoopConfig = LoopConfig()) {
     /** G8: the old worktree's utterance, prompt and held text are dropped; its open question is kept for later. */
     private fun onSwitch(s: LoopState, worktree: String): Transition {
         if (worktree == s.worktree) return Transition(s)
-        val moved = keepQuestion(s).copy(worktree = worktree, agent = AgentView.Unknown, rejections = 0)
+        val moved = keepQuestion(s).copy(worktree = worktree, agent = AgentView.Unknown, rejections = 0, lastProgress = null)
         return when (s.phase) {
             Phase.Idle, is Phase.Paused -> Transition(moved)
             else -> moved.question?.let { resayQuestion(moved, it) }
@@ -459,6 +484,8 @@ class VoiceLoop(val config: LoopConfig = LoopConfig()) {
         val e = p.event
         val heard = s.copy(heard = s.heard + e.id, queue = s.queue.filterNot { it.id == e.id })
         val next = when {
+            // A progress line is only a hint: back to waiting, never a question, never the mic.
+            e.kind == EventKind.Progress && e.session == s.worktree -> reenter(heard, p.resume, delayMs)
             e.session != s.worktree -> {
                 val kept = if (e.ask == AskKind.None) heard else heard.copy(questions = heard.questions + (e.session to e))
                 reenter(kept, p.resume, delayMs)
@@ -505,23 +532,54 @@ class VoiceLoop(val config: LoopConfig = LoopConfig()) {
     }
 
     private fun playable(s: LoopState): Event? = when (s.phase) {
-        Phase.Listening, is Phase.AgentWorking -> s.queue.firstOrNull()
-        is Phase.AwaitingAnswer, is Phase.AwaitingTap, is Phase.NeedsYou -> s.queue.firstOrNull { it.session == s.worktree }
+        Phase.Listening, is Phase.AgentWorking -> s.queue.firstOrNull { it.kind != EventKind.Progress || speakable(s, it) }
+        is Phase.AwaitingAnswer, is Phase.AwaitingTap, is Phase.NeedsYou ->
+            s.queue.firstOrNull { it.session == s.worktree && it.kind != EventKind.Progress }
         else -> null
     }
 
+    /** A progress line that belongs to this moment: AgentWorking, this worktree, and nothing newer of its session. */
+    private fun current(s: LoopState, e: Event): Boolean {
+        val at = s.queue.indexOf(e)
+        return s.phase is Phase.AgentWorking && e.session == s.worktree &&
+            s.queue.drop(at + 1).none { it.session == e.session }
+    }
+
+    private fun speakable(s: LoopState, e: Event): Boolean = current(s, e) && s.spokenProgress && !s.muted
+
+    /**
+     * Every queued progress line that cannot be spoken now is acknowledged silently and forgotten: it is news only
+     * while the agent is still on that step. A current one still updates the subtitle.
+     */
+    private fun dropProgress(t: Transition): Transition {
+        val s = t.state
+        if (s.phase == Phase.LoggedOut) return t
+        val stale = s.queue.filter { it.kind == EventKind.Progress && !speakable(s, it) }
+        if (stale.isEmpty()) return t
+        val shown = stale.lastOrNull { current(s, it) }?.let { shownText(it) } ?: s.lastProgress
+        val ids = stale.map { it.id }
+        return Transition(
+            s.copy(queue = s.queue.filterNot { it.id in ids }, heard = s.heard + ids, lastProgress = shown),
+            t.effects + Effect.Ack(ids),
+        )
+    }
+
+    private fun shownText(e: Event) = e.text.take(ProgressLine.MAX_CHARS)
+
     // ---- Stage 2: play queued events ---------------------------------------------------------------------------------
 
+    /** Before and after it, [dropProgress]: a progress line left behind by another event is not kept for later. */
     private fun drain(t: Transition): Transition {
         var current = t
-        repeat(t.state.queue.size) {
+        repeat(current.state.queue.size) {
             val event = playable(current.state) ?: return current
             val s = current.state
             val resume = (s.phase as? Phase.AgentWorking)?.copy(settledTimer = false) ?: s.phase
             val speaking = Phase.Speaking(event, resume)
+            val shown = if (event.kind == EventKind.Progress) shownText(event) else s.lastProgress
             current = if (!s.muted) {
                 return Transition(
-                    s.copy(phase = speaking, queue = s.queue.filterNot { it.id == event.id }),
+                    s.copy(phase = speaking, queue = s.queue.filterNot { it.id == event.id }, lastProgress = shown),
                     current.effects + Effect.Play(event, withName = event.session != s.worktree),
                 )
             } else {
@@ -637,6 +695,11 @@ class VoiceLoop(val config: LoopConfig = LoopConfig()) {
             }
         }
         if (state.muted) effects = effects.filterNot { it is Say }
+        // The cue starts on entering AgentWorking; views and timers inside it keep its cadence.
+        if (after is Phase.AgentWorking && before !is Phase.AgentWorking) effects = effects + listOfNotNull(cueStart())
+        // The subtitle's progress line belongs to this turn's wait only.
+        val waiting = after is Phase.AgentWorking || (after as? Phase.Speaking)?.resume is Phase.AgentWorking
+        if (!waiting && state.lastProgress != null) state = state.copy(lastProgress = null)
 
         // Timers: those of the old phase that the new one does not keep are cancelled first; one started by a phase
         // passed through within this step (a muted event played in between) is cancelled at the end.
@@ -726,11 +789,16 @@ class VoiceLoop(val config: LoopConfig = LoopConfig()) {
         is Phase.Transcribing -> (if (p.retryPending) setOf(Timer.TranscribeRetry) else emptySet()) + backTimers(p.purpose)
         is Phase.Capturing -> backTimers(p.purpose)
         is Phase.Sending -> if (p.retryPending) setOf(Timer.SendRetry) else emptySet()
-        is Phase.AgentWorking -> if (p.settledTimer) setOf(Timer.Settled) else emptySet()
+        is Phase.AgentWorking -> (if (p.settledTimer) setOf(Timer.Settled) else emptySet()) +
+            (if (config.workingCueMs != null) setOf(Timer.WorkingCue) else emptySet())
         is Phase.Paused -> setOf(Timer.PauseLimit)
         is Phase.NewWorktree -> flowRules.runningTimers(p.flow)
         else -> emptySet()
     }
+
+    private fun cueStart(): StartTimer? = config.workingCueMs?.let { StartTimer(Timer.WorkingCue, it) }
+
+    private val Phase.isProgress: Boolean get() = this is Phase.Speaking && event.kind == EventKind.Progress
 
     /** The flow's timers that keep running while one of its captures is heard (the card's expiry), never NoSpeech. */
     private fun backTimers(purpose: CapturePurpose): Set<Timer> =

@@ -95,6 +95,11 @@ fun SettingsScreen(state: SettingsUiState, actions: VoiceUiActions, onBack: () -
                 actions.setRememberPasscode(it)
             }
             ToggleRow("Mute spoken replies", null, state.muted, "settings_mute") { actions.setMuted(it) }
+            ToggleRow(
+                "Speak progress updates",
+                "Short spoken updates while the agent works. Off leaves only the soft tick.",
+                state.spokenProgress, "settings_progress",
+            ) { actions.setSpokenProgress(it) }
 
             HorizontalDivider()
             Heading("Speaker")

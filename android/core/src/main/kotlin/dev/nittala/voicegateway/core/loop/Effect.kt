@@ -72,7 +72,8 @@ sealed interface Effect {
     data class CreateWorktree(val planId: String) : Effect
 }
 
-enum class EarconKind { Listen, YourTurn, Sent, Rejected, Error, Paused }
+/** [Working]: the soft working cue, every [LoopConfig.workingCueMs] while the agent works (plays while muted). */
+enum class EarconKind { Listen, YourTurn, Sent, Rejected, Error, Paused, Working }
 
 /** Every phone-voice line of the loop. */
 object Lines {

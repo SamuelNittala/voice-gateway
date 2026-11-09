@@ -110,6 +110,9 @@ class LoopControllerScenarioTest {
 
     private fun debugScenario(block: Harness.() -> Unit) = runTest { Harness(this, debugOn = true).block() }
 
+    /** The app's loop: the working cue on (APP_LOOP_CONFIG). */
+    private fun appScenario(block: Harness.() -> Unit) = runTest { Harness(this, loop = VoiceLoop(APP_LOOP_CONFIG)).block() }
+
     /** The first-prompt hand-off switched on (not the default). */
     private fun handoffScenario(block: Harness.() -> Unit) =
         runTest { Harness(this, loop = VoiceLoop(LoopConfig(handoffFirstPrompt = true))).block() }
@@ -150,6 +153,66 @@ class LoopControllerScenarioTest {
         agentReplies("event_summary")
         assertEquals(listOf("000000000000000b"), api.acked)
         assertEquals(Phase.Listening, phase)
+    }
+
+    // ---- Progress updates: the working cue and spoken progress lines ----------------------------------------------
+
+    @Test
+    fun theAppLoopHasTheWorkingCue() {
+        assertEquals(LoopConfig(workingCueMs = 15_000), APP_LOOP_CONFIG)
+    }
+
+    @Test
+    fun aLongTurnTicksSpeaksItsProgressLineThenTheReplyWithNoMicInBetween() = appScenario {
+        startListening()
+        say(FIRST)
+        api.show("session_working")
+        advance(2_500)
+        assertTrue(phase is Phase.AgentWorking)
+        assertFalse(EarconKind.Working in earcons.kinds)
+        advance(15_000)
+        assertEquals(1, earcons.kinds.count { it == EarconKind.Working })
+        assertFalse(capture.running)
+
+        api.show("event_progress")
+        advance(2_500)
+        val line = api.view.events.single()
+        assertEquals(listOf(line.id), speaker.played)
+        assertTrue(phase is Phase.Speaking)
+        advance(speaker.playMs + 1_000)
+        assertEquals(listOf(line.id), api.acked)
+        assertTrue(phase is Phase.AgentWorking)
+        assertEquals("Reading the failing test", controller.ui.value.detail)
+        assertEquals("the mic never opened for a progress line", 1, capture.configs.size)
+
+        advance(15_000)
+        assertEquals(2, earcons.kinds.count { it == EarconKind.Working })
+        api.show("event_progress_then_summary")
+        advance(2_500)
+        advance(speaker.playMs + 2_000)
+        val reply = api.view.events.single()
+        assertEquals(listOf(line.id, reply.id), speaker.played)
+        assertEquals(listOf(line.id, reply.id), api.acked)
+        assertEquals(Phase.Listening, phase)
+        assertEquals(listOf(FIRST), prompts)
+        val ticks = earcons.kinds.count { it == EarconKind.Working }
+        advance(30_000)
+        assertEquals("no cue once the turn is over", ticks, earcons.kinds.count { it == EarconKind.Working })
+    }
+
+    @Test
+    fun withSpeakProgressUpdatesOffOnlyTheCueIsHeard() = appScenario {
+        startListening()
+        send(LoopInput.ProgressChanged(false))
+        say(FIRST)
+        api.show("event_progress")
+        advance(2_500)
+        val line = api.view.events.single()
+        assertEquals(emptyList<String>(), speaker.played)
+        assertEquals(listOf(line.id), api.acked)
+        assertTrue(phase is Phase.AgentWorking)
+        advance(15_000)
+        assertTrue(EarconKind.Working in earcons.kinds)
     }
 
     // ---- ask: true, the question turn ------------------------------------------------------------------------------

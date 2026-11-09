@@ -137,6 +137,27 @@ class GatewayAccountTest {
     }
 
     @Test
+    fun restoreTellsTheLoopTheStoredProgressSetting() = rig { r ->
+        r.account.restore()
+        assertEquals(listOf<LoopInput>(LoopInput.ProgressChanged(true)), r.inputs)
+        r.inputs.clear()
+        r.settings.setSpokenProgress(false)
+        r.account.restore()
+        assertEquals(listOf<LoopInput>(LoopInput.ProgressChanged(false)), r.inputs)
+    }
+
+    @Test
+    fun theProgressSettingIsSaved() = rig { r ->
+        r.account.setSpokenProgress(false)
+        advanceUntilIdle()
+        assertFalse(r.settings.isSpokenProgressOn())
+        r.account.setSpokenProgress(true)
+        advanceUntilIdle()
+        assertTrue(r.settings.isSpokenProgressOn())
+        assertTrue(r.inputs.isEmpty()) // The loop is told by AppActions, once.
+    }
+
+    @Test
     fun silentReloginTriesOnceWithTheSavedPasscode() = rig { r ->
         r.account.login(url, "correct horse", remember = true)
         advanceUntilIdle()

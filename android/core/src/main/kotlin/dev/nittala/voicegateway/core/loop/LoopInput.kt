@@ -95,6 +95,12 @@ sealed interface LoopInput {
 
     data class MuteChanged(val muted: Boolean) : LoopInput
 
+    /**
+     * The "Speak progress updates" setting (persisted by the app, default on). Off: progress lines are acknowledged
+     * silently and a line being spoken stops. Taken in every phase, LoggedOut too: it is a setting, not an action.
+     */
+    data class ProgressChanged(val spoken: Boolean) : LoopInput
+
     /** The activity became visible or hidden (the service keeps the loop running either way). */
     data class AppVisible(val visible: Boolean) : LoopInput
 
@@ -193,4 +199,7 @@ enum class Timer {
 
     /** W6: 120 s waiting for the new orchestrator; then the request is kept in Held. */
     HandoffLimit,
+
+    /** The soft working cue: runs exactly while in AgentWorking, when [LoopConfig.workingCueMs] is set. */
+    WorkingCue,
 }

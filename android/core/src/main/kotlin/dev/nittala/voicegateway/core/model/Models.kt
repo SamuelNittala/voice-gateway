@@ -59,10 +59,14 @@ object AskKindSerializer : KSerializer<AskKind> {
     }
 }
 
-/** An event's `kind`: `summary`, `needs-you`, `check-screen`; any other value is [Unknown] and is not dropped. */
+/**
+ * An event's `kind`: `summary`, `needs-you`, `check-screen`, `progress`; any other value is [Unknown] and is not
+ * dropped. [Progress] is a hint while the agent works (the agent's `PROGRESS[nonce]:` line): never final, never a
+ * question, spoken only by the voice loop's progress rules (VoiceLoop).
+ */
 @Serializable(with = EventKindSerializer::class)
 enum class EventKind(val wire: String) {
-    Summary("summary"), NeedsYou("needs-you"), CheckScreen("check-screen"), Unknown("");
+    Summary("summary"), NeedsYou("needs-you"), CheckScreen("check-screen"), Progress("progress"), Unknown("");
 
     companion object {
         /** Pure: the kind for a wire string; [Unknown] for anything not listed. */
@@ -74,6 +78,16 @@ object EventKindSerializer : KSerializer<EventKind> {
     override val descriptor: SerialDescriptor = PrimitiveSerialDescriptor("EventKind", PrimitiveKind.STRING)
     override fun deserialize(decoder: Decoder): EventKind = EventKind.of(decoder.decodeString())
     override fun serialize(encoder: Encoder, value: EventKind) = encoder.encodeString(value.wire)
+}
+
+/**
+ * The gateway's caps on progress lines (gateway.py `MAX_PROGRESS_CHARS`, `MAX_PROGRESS_EVENTS`,
+ * `PROGRESS_MIN_GAP_SECONDS`), pinned against the server by ServerMirrorTest. The app trusts no longer text.
+ */
+object ProgressLine {
+    const val MAX_CHARS = 100
+    const val MAX_PER_SEND = 5
+    const val MIN_GAP_SECONDS = 20
 }
 
 /** One unacknowledged announcement, in `events` of both views. `ask` only ever comes on a voice prompt's summary. */

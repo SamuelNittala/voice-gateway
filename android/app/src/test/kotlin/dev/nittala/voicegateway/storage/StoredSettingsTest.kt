@@ -27,6 +27,23 @@ class StoredSettingsTest {
     }
 
     @Test
+    fun spokenProgressIsOnByDefaultAndKept() {
+        val s = settings()
+        assertTrue(s.isSpokenProgressOn())
+        s.setSpokenProgress(false)
+        assertFalse(s.isSpokenProgressOn())
+        assertEquals("false", prefs.entries[StoredSettings.SPOKEN_PROGRESS_KEY])
+        assertEquals("spoken_progress", StoredSettings.SPOKEN_PROGRESS_KEY)
+        assertFalse(settings().isSpokenProgressOn()) // Read again from the same store: kept.
+        loggedIn(s)
+        s.logout()
+        assertFalse(s.isSpokenProgressOn()) // A setting, not a secret: logout keeps it.
+        s.setSpokenProgress(true)
+        assertTrue(s.isSpokenProgressOn())
+        assertTrue(secrets.entries.keys.none { it.contains("progress") })
+    }
+
+    @Test
     fun rememberPasscodeIsOffByDefaultAndSavesNothing() {
         val s = settings()
         assertFalse(s.isRememberPasscodeOn())

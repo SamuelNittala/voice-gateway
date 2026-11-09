@@ -16,6 +16,7 @@ import dev.nittala.voicegateway.core.config.validateBaseUrl
  *   while it is on. Turning it off wipes the saved passcode. [rememberedPasscode] is null while it is off (and wipes
  *   any leftover entry).
  * - [logout] deletes the cookie and the remembered passcode; the base URL and the remember setting stay.
+ * - Speak progress updates: ON by default; stored only when off. Not a secret, kept through logout.
  */
 interface AppSettings {
     fun baseUrl(): String?
@@ -27,6 +28,8 @@ interface AppSettings {
     fun rememberPasscode(passcode: String): Boolean
     fun rememberedPasscode(): String?
     fun logout()
+    fun isSpokenProgressOn(): Boolean
+    fun setSpokenProgress(on: Boolean)
 }
 
 /** [AppSettings] with plain values in [prefs] and secrets in [secrets] (the cookie through [cookies]). */
@@ -78,6 +81,10 @@ class StoredSettings(
 
     override fun logout() = forgetSecrets()
 
+    override fun isSpokenProgressOn(): Boolean = prefs.get(SPOKEN_PROGRESS_KEY) != "false"
+
+    override fun setSpokenProgress(on: Boolean) = prefs.put(SPOKEN_PROGRESS_KEY, if (on) null else "false")
+
     private fun forgetSecrets() {
         cookies.put(null)
         secrets.put(PASSCODE_ENTRY, null)
@@ -87,5 +94,6 @@ class StoredSettings(
         const val BASE_URL_KEY = "base_url"
         const val REMEMBER_PASSCODE_KEY = "remember_passcode"
         const val PASSCODE_ENTRY = "passcode"
+        const val SPOKEN_PROGRESS_KEY = "spoken_progress"
     }
 }

@@ -10,6 +10,9 @@ interface Account {
     fun logout()
     fun setBaseUrl(raw: String)
     fun setRememberPasscode(on: Boolean)
+
+    /** Saves "Speak progress updates" (the loop is told by [AppActions]). */
+    fun setSpokenProgress(on: Boolean)
 }
 
 /**
@@ -18,6 +21,7 @@ interface Account {
  * - [yes] / [no] -> `ConfirmTap(true/false)`; [key] -> `KeyTap`; [stop] -> `StopTap`; [restart] -> `RestartTap`;
  * - [sendHeld] -> `SendNowTap`; [discardHeld] -> `DiscardTap`; [sendTyped] -> `TypedSend` (voice false);
  * - [switchWorktree] -> `WorktreeChanged`; [setMuted] -> `MuteChanged`; [setSpeaker] -> [LoopControls.setSpeaker];
+ * - [setSpokenProgress] -> saved by [Account.setSpokenProgress], then `ProgressChanged`;
  * - W6: [newWorktree] -> `NewWorktreeTap`; [planWorktree] -> `NewWorktreeTyped`; [pickRepo] -> `CandidateTap`;
  *   [pickBase] -> `BaseTap`; [typeBase] -> `BaseTyped`; [createWorktree] -> `CreateTap`; [createFromCopy] ->
  *   `OfflineCreateTap`; [cancelWorktree] -> `CancelTap`.
@@ -43,6 +47,10 @@ class AppActions(private val loop: LoopControls, private val account: Account) :
     override fun setBaseUrl(raw: String) = account.setBaseUrl(raw)
     override fun setRememberPasscode(on: Boolean) = account.setRememberPasscode(on)
     override fun setSpeaker(engine: Engine) = loop.setSpeaker(engine)
+    override fun setSpokenProgress(on: Boolean) {
+        account.setSpokenProgress(on)
+        loop.send(LoopInput.ProgressChanged(on))
+    }
     override fun newWorktree() = loop.send(LoopInput.NewWorktreeTap)
     override fun planWorktree(text: String) = loop.send(LoopInput.NewWorktreeTyped(text))
     override fun pickRepo(repoId: String) = loop.send(LoopInput.CandidateTap(repoId))

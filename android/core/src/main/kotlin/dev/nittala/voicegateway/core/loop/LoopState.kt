@@ -197,6 +197,9 @@ data class AgentView(
  * - [questions]: the open question (ask or confirm event) per worktree, kept across pauses and worktree switches.
  * - [micProblem]: the mic failed in the new-worktree flow (its Request or Card stays, mic off): shown until the mic is
  *   opened again or the flow is no longer on a Request or Card. Elsewhere `Paused(MicSilenced/MicUnavailable)` says it.
+ * - [spokenProgress]: the "Speak progress updates" setting ([LoopInput.ProgressChanged]).
+ * - [lastProgress]: the current worktree's latest progress line of this turn, for the working screen's subtitle;
+ *   only kept while in AgentWorking (or speaking with AgentWorking to come back to).
  */
 data class LoopState(
     val worktree: String,
@@ -210,6 +213,8 @@ data class LoopState(
     val heard: Set<String> = emptySet(),
     val questions: Map<String, Event> = emptyMap(),
     val micProblem: MicFailure? = null,
+    val spokenProgress: Boolean = true,
+    val lastProgress: String? = null,
 ) {
     /** The open question of the current worktree, if any. */
     val question: Event? get() = questions[worktree]

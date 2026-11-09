@@ -777,6 +777,7 @@ function announce(view) {
   showSettings(view);
   const canSpeak = Boolean(speech) || engineChain().length > 0;
   for (const event of view.events || []) {
+    if (event.kind === "progress") continue;  // The app's working updates: neither said nor acknowledged here.
     if (announced.has(event.id)) continue;
     const words = eventWords(event);
     $("announce").textContent = words;

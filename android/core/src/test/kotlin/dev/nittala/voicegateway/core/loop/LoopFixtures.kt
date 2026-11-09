@@ -52,6 +52,12 @@ fun event(
 val QUESTION = event("q1", ask = AskKind.Answer, text = "Did you mean wt-api or wt-web?")
 val CONFIRM = event("c1", ask = AskKind.Confirm, text = "Delete branch wt-old?")
 
+/** A progress line of the current worktree (the agent's `PROGRESS[nonce]:`), spoken only while it works. */
+fun progress(id: String = "p1", session: String = WT, text: String = "Reading the failing test"): Event =
+    event(id, kind = EventKind.Progress, session = session, text = text)
+
+val PROGRESS = progress()
+
 /** Loud PCM (about -12 dBFS) with [voicedFrames] voiced of [spanFrames] (32 ms frames). */
 fun utterance(voicedFrames: Int = 50, spanFrames: Int = 60, loud: Boolean = true): Utterance {
     val pcm = ShortArray(16_000) { if (!loud) 0 else if (it % 2 == 0) 8_000 else -8_000 }

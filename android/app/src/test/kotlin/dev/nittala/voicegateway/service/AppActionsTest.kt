@@ -37,6 +37,10 @@ class AppActionsTest {
         override fun setRememberPasscode(on: Boolean) {
             calls += "remember $on"
         }
+
+        override fun setSpokenProgress(on: Boolean) {
+            calls += "progress $on"
+        }
     }
 
     private val r = Recorder()
@@ -67,6 +71,14 @@ class AppActionsTest {
             ),
             r.inputs,
         )
+    }
+
+    @Test
+    fun speakProgressUpdatesIsSavedAndTellsTheLoop() {
+        actions.setSpokenProgress(false)
+        actions.setSpokenProgress(true)
+        assertEquals(listOf("progress false", "progress true"), r.calls)
+        assertEquals(listOf<LoopInput>(LoopInput.ProgressChanged(false), LoopInput.ProgressChanged(true)), r.inputs)
     }
 
     @Test

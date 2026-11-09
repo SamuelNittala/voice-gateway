@@ -99,6 +99,19 @@ class ModelsTest {
     }
 
     @Test
+    fun progressEvents() {
+        val line = onlyEvent("event_progress")
+        assertEquals(EventKind.Progress to "Reading the failing test", line.kind to line.text)
+        assertEquals(AskKind.None, line.ask)
+        assertEquals(EventKind.Progress, EventKind.of("progress"))
+        assertEquals("working", parse<SessionView>("event_progress").orchestrator?.status)
+        assertEquals(listOf("wt-scratch"), parse<SessionView>("event_progress").waiting)
+        // The reply's view: the unheard progress line was dropped by the gateway.
+        assertEquals(EventKind.Summary, onlyEvent("event_progress_then_summary").kind)
+        assertTrue(onlyEvent("event_progress_then_summary").text.startsWith("Fixed the test."))
+    }
+
+    @Test
     fun askOnEvents() {
         assertEquals(AskKind.None, onlyEvent("event_summary").ask)
         assertEquals(AskKind.None, onlyEvent("event_voice_summary").ask)

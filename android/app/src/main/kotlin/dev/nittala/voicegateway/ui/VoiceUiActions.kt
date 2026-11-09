@@ -24,7 +24,7 @@ import dev.nittala.voicegateway.core.speech.Engine
  *
  * Account and settings: [login] (the passcode is passed straight through, never stored by the UI; [remember] is the
  * opt-in), [logout], [setBaseUrl] (raw text; the controller validates and stores), [setRememberPasscode],
- * [setSpeaker].
+ * [setSpeaker], [setSpokenProgress] ("Speak progress updates": saved, and `ProgressChanged` for the loop).
  */
 interface VoiceUiActions {
     fun start()
@@ -57,6 +57,9 @@ interface VoiceUiActions {
 
     /** The microphone notice's "Open settings": this app's page in the system settings (the permission gate does it). */
     fun openAppSettings() = Unit
+
+    /** "Speak progress updates" in Settings. Does nothing by default (previews and UI test fakes). */
+    fun setSpokenProgress(on: Boolean) = Unit
 }
 
 /** Does nothing: for previews and UI tests. */

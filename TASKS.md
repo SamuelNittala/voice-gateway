@@ -646,6 +646,75 @@ path only when the flag is given, so `prune.py` itself keeps no worktree command
       kept 23 (12 ignored outside safe list, 5 dirty, 3 main checkout not found, 2 not a git folder).
 - [ ] W4 The real `wt prune --worktrees` is the user's to run.
 
+## Progress updates (2026-11-09)
+
+Plan: ~/.claude/plans/voice-progress-updates.md. While the agent works after a voice prompt the app gives (a) a soft
+working cue and (b) short spoken milestones the agent writes as `PROGRESS[nonce]: <text>`. Typed prompts (the web
+page, the app's typed sheet) stay byte-identical. The user's answers (2026-11-09) to the plan's open decisions:
+1. Cue: one soft tick every 15 s while in AgentWorking, the first 15 s after the send.
+2. The cue plays while muted (mute is voices only).
+3. One setting only, "Speak progress updates", persisted in `StoredSettings` (key `spoken_progress`), default on;
+   off leaves the cue only. No separate cue toggle.
+4. App-only: no new field on `POST /api/prompt`. The agent still writes lines; the app drops them when off.
+5. Caps: 100 characters, 5 per send, 20 s minimum gap, only the newest unseen line is made into an event.
+6. The web page ignores progress events: it neither speaks nor acknowledges them.
+7. A newer event of the current worktree interrupts a progress line mid-speech.
+8. The working screen's subtitle shows the latest progress line of this turn.
+9. Instruction wording approved as drafted (below).
+No new `seq` or cursor field: event id, acknowledge, the app's `heard` set and the server's per-send `seen` set
+already make each line heard at most once.
+
+Spec, gateway
+- `PROGRESS_PLACEHOLDER = "what you are doing now"`, `MAX_PROGRESS_CHARS = 100`, `MAX_PROGRESS_EVENTS = 5`,
+  `PROGRESS_MIN_GAP_SECONDS = 20`, `PROGRESS_READ_SECONDS = 4`.
+- Voice and tap prompts (never typed) get, after the voice or tap clause and before "End your reply ...": "While you
+  work on a task that takes more than a minute, you may write a short progress line for the ear, at most twelve
+  plain words, no code, paths or file names, never a question, on its own line in exactly this form:
+  PROGRESS[nonce]: what you are doing now. Write one only when you start a new long step, at most five in all, and
+  never put that tag in files, commands or tool input." Still one line ending in the SPOKEN placeholder.
+- Pure `find_progress(screen, nonce)`: every line starting (after an optional bullet) with the exact tag, top to
+  bottom, with `find_spoken`'s continuation rule, cleaned and cut at a word to 100 characters. Dropped: empty, the
+  echoed placeholder (so a wrapped echo never counts), anything `ASK:`/`ASK!:`.
+- Read only for a voice record with a nonce, only while `working`, at most once per 4 s per record (one extra
+  visible-screen read); never while blocked or settled.
+- `Announcements.progress`: lines not seen before (by `normalise_phrase`) are fresh; all are marked seen; the last
+  fresh one becomes a `progress` event (`final=False`, never `ask`) if fewer than 5 were made and 20 s passed since
+  the last. A skipped line is never made later. A final event (`summary`, `check-screen`) and a new send on that
+  session drop its unacknowledged `progress` events. Event shape: `{id, kind: "progress", session, worktree, text}`.
+- `static/app.js`: `announce()` skips `kind === "progress"` (no speech, no acknowledge).
+
+Spec, app
+- `EventKind.Progress`, `EarconKind.Working` (`TONE_PROP_BEEP`, 80 ms, volume 25), `Timer.WorkingCue`,
+  `LoopState.spokenProgress` (default true) and `lastProgress`, `LoopInput.ProgressChanged` (taken in every phase,
+  LoggedOut too), `LoopConfig.workingCueMs` (null = no cue; the app's `APP_LOOP_CONFIG` sets 15 000).
+- The cue runs exactly while in AgentWorking: started on entering it, Earcon(Working) and restart on firing,
+  cancelled on leaving. Views inside AgentWorking keep its cadence.
+- A progress event plays only in AgentWorking, for the current worktree, with the setting on, not muted and no later
+  event of its session queued; every other one is acknowledged silently (no earcon) and never kept for later. After
+  it: back to AgentWorking (no mic, no question). While it plays the poll stays at 2 s. A newer non-progress event of
+  the current worktree interrupts it; a tap interrupts it (mic stays off); the headset long-press sends Stop;
+  turning the setting off stops it. `ProgressLine` mirrors the server's caps (ServerMirrorTest).
+- Subtitle: the latest progress line of this turn (spoken or not), cleared when the loop leaves AgentWorking or the
+  worktree changes. Settings: "Speak progress updates" toggle (`settings_progress`).
+
+- [x] P0 Spec (above), with the user's answers.
+- [x] P1 Gateway tests first: 38 new (find_progress, instruction text, the working path, the page), plus the
+      `voice_instruction`/`tap_instruction` helpers updated. 36 failed first on 3.14 (31 new, 5 existing exact-text
+      tests); the 7 new that passed assert something does not happen (typed text, blocked, settled, older nonce).
+- [x] P2 Gateway: constants, `_progress_clause`, `find_progress`, `PendingSend` progress fields,
+      `Announcements.progress_due`/`progress`/`_drop_progress`, `_check_pending` working branch; `static/app.js`
+      skip. 846 green on Python 3.14 and the macOS system 3.9. Headless page check not run.
+- [x] P3 Fixtures: `make_fixtures.py` `progress()` (last, so earlier ids stay put): `event_progress`,
+      `event_progress_then_summary`. 86 files, identical on 3.14 and 3.9; git shows only the 2 new files.
+- [x] P4 `:core` tests first (surface added with no behaviour): `VoiceLoopProgressTest`, `VoiceUiMapperProgressTest`,
+      a progress random walk with the cue, `ModelsTest`, `ServerMirrorTest`. 27 of 36 new failed first.
+- [x] P5 `:core`: `VoiceLoop` (stage 2 drop, playable, finishPlayback, interrupt, long-press, cue, poll), mapper.
+      508 green; the existing tables unchanged.
+- [x] P6 `:app` tests first (tone and volume, setting stored, actions, account restore, two scenarios with the
+      fake gateway); red (did not build) before the change. Then `Earcons`, `StoredSettings`, `AppActions`,
+      `GatewayAccount`, `APP_LOOP_CONFIG` in `AppGraph`, the Settings toggle. 220 green; debug APK built.
+- [ ] P7 Live on the phone (pending the user): a long voice task, hear the tick and 1-3 milestones, toggle off.
+
 ## Not done, pending the user
 
 - [ ] Orchestrator launch live checks (scratch repo under a scratch root, local bare origin, at most 4 real prompts):

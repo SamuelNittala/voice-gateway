@@ -119,6 +119,12 @@ MAX_EVENTS = 32
 MAX_ACK_IDS = 64
 MAX_SPOKEN_CONTINUATION_LINES = 8
 SPOKEN_PLACEHOLDER = "your spoken summary"
+# Progress lines while a voice prompt's reply is still being worked on: hints for the ear, never a backlog.
+PROGRESS_PLACEHOLDER = "what you are doing now"
+MAX_PROGRESS_CHARS = 100
+MAX_PROGRESS_EVENTS = 5  # Per send.
+PROGRESS_MIN_GAP_SECONDS = 20
+PROGRESS_READ_SECONDS = 4  # At most one extra screen read per working voice send this often.
 
 # Voice prompts from the Android app. Whisper's commonest inventions on silence or noise, in is_voice_noise's form.
 VOICE_NOISE_PHRASES = ("thank you", "thanks for watching", "thank you for watching", "you", "bye", "okay", "so",
@@ -857,11 +863,19 @@ _TAP_CLAUSE = ("Sent from my phone by a tap on the Yes or No button shown for yo
                "step. Ask any new question with ASK: or ASK!: as before.")
 
 
+def _progress_clause(nonce):
+    return ("While you work on a task that takes more than a minute, you may write a short progress line for the ear, "
+            "at most twelve plain words, no code, paths or file names, never a question, on its own line in exactly "
+            f"this form: PROGRESS[{nonce}]: {PROGRESS_PLACEHOLDER}. Write one only when you start a new long step, at "
+            "most five in all, and never put that tag in files, commands or tool input.")
+
+
 def summary_instruction(nonce, voice=False, tap=False):
     """One line, ending in a placeholder. An echo of this that wraps so the tag starts a line is told apart by it.
-    A voice prompt gets the clarify clause first, or the tap clause for a Yes or No tap, so the line still ends in
-    the placeholder. `tap` counts only with `voice`."""
-    opening = (_TAP_CLAUSE if tap else _voice_clause()) if voice else "Sent from my phone."
+    A voice prompt gets the clarify clause first, or the tap clause for a Yes or No tap, then the progress clause, so
+    the line still ends in the placeholder. `tap` counts only with `voice`."""
+    opening = (f"{_TAP_CLAUSE if tap else _voice_clause()} {_progress_clause(nonce)}" if voice
+               else "Sent from my phone.")
     return (f"({opening} End your reply with one final line of at most two plain sentences, written to be read aloud, "
             f"with no code, paths or markdown, in exactly this form: SPOKEN[{nonce}]: {SPOKEN_PLACEHOLDER})")
 
@@ -892,15 +906,15 @@ def split_ask(text):
     return ("confirm" if match.group(1) or destructive else True), rest
 
 
-def clean_spoken(text):
-    """One plain line of at most MAX_SPOKEN_CHARS, cut at a word if there is one to cut at."""
+def clean_spoken(text, limit=MAX_SPOKEN_CHARS):
+    """One plain line of at most `limit` characters, cut at a word if there is one to cut at."""
     text = _ANSI_RE.sub("", text)
     kept = "".join(" " if ch in "\r\n\t\u2028\u2029" else ch for ch in text)
     kept = "".join(ch for ch in kept if unicodedata.category(ch) not in ("Cc", "Cf", "Cs", "Co", "Cn"))
     words = " ".join(kept.split())
-    if len(words) <= MAX_SPOKEN_CHARS:
+    if len(words) <= limit:
         return words
-    cut = words[:MAX_SPOKEN_CHARS]
+    cut = words[:limit]
     return (cut.rsplit(" ", 1)[0] if " " in cut else cut).rstrip(" ,;:-")
 
 
@@ -914,9 +928,9 @@ def _spoken_continuation(lines):
     return taken
 
 
-def _is_echoed_placeholder(text):
+def _is_echoed_placeholder(text, placeholder=SPOKEN_PLACEHOLDER):
     words = text.rstrip(")").strip().lower()
-    return bool(words) and (words.startswith(SPOKEN_PLACEHOLDER) or SPOKEN_PLACEHOLDER.startswith(words))
+    return bool(words) and (words.startswith(placeholder) or placeholder.startswith(words))
 
 
 def find_spoken(screen, nonce):
@@ -931,6 +945,22 @@ def find_spoken(screen, nonce):
         if text and not _is_echoed_placeholder(text):
             return text
     return None
+
+
+def find_progress(screen, nonce):
+    """The text of every line starting with this exact progress tag, top to bottom. Empty lines, the echoed
+    placeholder and questions are dropped: a progress line is only ever something to hear."""
+    pattern = re.compile(rf"^\s*(?:[{_SPOKEN_MARKERS}]\s*)?PROGRESS\[{re.escape(nonce)}\]:[ \t]*(.*)$")
+    lines = screen.splitlines()
+    found = []
+    for index, line in enumerate(lines):
+        match = pattern.match(line)
+        if match is None:
+            continue
+        text = clean_spoken(" ".join([match.group(1), *_spoken_continuation(lines[index + 1:])]), MAX_PROGRESS_CHARS)
+        if text and not _is_echoed_placeholder(text, PROGRESS_PLACEHOLDER) and _ASK_RE.match(text) is None:
+            found.append(text)
+    return found
 
 
 def spoken_name(session):
@@ -2126,6 +2156,10 @@ class PendingSend:
         self.announced = False  # The final event, `summary` or `check-screen`, has been made.
         self.blocked = False  # The last poll saw a dialog, so `needs-you` was already said for it.
         self.quiet_since = None
+        self.progress_seen = set()  # normalise_phrase of every progress line seen, made into an event or not.
+        self.progress_count = 0
+        self.last_progress_at = None
+        self.last_progress_read = None
 
 
 class Announcements:
@@ -2141,6 +2175,7 @@ class Announcements:
         record = PendingSend(session, nonce, self.clock.now(), orchestrator.pane_id, orchestrator.terminal_id, voice)
         with self.lock:
             self.pending[session] = record
+            self._drop_progress(session)
 
     def waiting(self):
         with self.lock:
@@ -2176,7 +2211,37 @@ class Announcements:
                 return
             if final:
                 record.announced = True
+                self._drop_progress(record.session)
             self._add(record, kind, text, ask)
+
+    def progress_due(self, record):
+        """Whether to read the screen for progress lines now: at most once per PROGRESS_READ_SECONDS."""
+        now = self.clock.now()
+        with self.lock:
+            if record.last_progress_read is not None and now - record.last_progress_read < PROGRESS_READ_SECONDS:
+                return False
+            record.last_progress_read = now
+            return True
+
+    def progress(self, record, texts):
+        """At most one `progress` event for the lines on screen: the newest one not seen before, if the count and gap
+        allow. Every line is marked seen either way, so a skipped line is never said later."""
+        now = self.clock.now()
+        with self.lock:
+            if not self._current(record):
+                return
+            fresh = [text for text in texts if normalise_phrase(text) not in record.progress_seen]
+            record.progress_seen.update(normalise_phrase(text) for text in texts)
+            gap_passed = record.last_progress_at is None or now - record.last_progress_at >= PROGRESS_MIN_GAP_SECONDS
+            if fresh and record.progress_count < MAX_PROGRESS_EVENTS and gap_passed:
+                record.progress_count += 1
+                record.last_progress_at = now
+                self._add(record, "progress", fresh[-1])
+
+    def _drop_progress(self, session):
+        """Progress not yet heard is stale once the send has its final event or a new send replaces it."""
+        for event_id in [i for i, e in self.events.items() if e["kind"] == "progress" and e["session"] == session]:
+            del self.events[event_id]
 
     def _current(self, record):
         """Only the latest send on a session, and only until its final event."""
@@ -2186,8 +2251,9 @@ class Announcements:
         event_id = secrets.token_hex(8)
         while event_id in self.events:
             event_id = secrets.token_hex(8)
+        limit = MAX_PROGRESS_CHARS if kind == "progress" else MAX_SPOKEN_CHARS
         self.events[event_id] = {"id": event_id, "kind": kind, "session": record.session,
-                                 "worktree": spoken_name(record.session), "text": clean_spoken(text)}
+                                 "worktree": spoken_name(record.session), "text": clean_spoken(text, limit)}
         if ask:  # Only a voice prompt's question: True, or "confirm" for one answered by a tap.
             self.events[event_id]["ask"] = ask
         while len(self.events) > MAX_EVENTS:
@@ -3081,6 +3147,7 @@ class Gateway:
             self.announcer.blocked(record, f"{spoken_name(name)} needs you")
         elif orchestrator.status == "working":
             self.announcer.working(record)
+            self._progress_on_screen(record, orchestrator)
         else:
             self.announcer.unblocked(record)
             spoken, ask = self._spoken_on_screen(record, orchestrator), False
@@ -3090,6 +3157,16 @@ class Gateway:
                 self.announcer.emit(record, "summary", spoken, ask=ask)
             elif self.announcer.quiet_long_enough(record):
                 self.announcer.emit(record, "check-screen", f"{spoken_name(name)} finished, check the screen")
+
+    def _progress_on_screen(self, record, orchestrator):
+        """Voice sends only: a typed prompt's reply is read on the screen, and costs no extra read while working."""
+        if not record.voice or record.nonce is None or not self.announcer.progress_due(record):
+            return
+        try:
+            texts = find_progress(self._read_screen(record.session, orchestrator), record.nonce)
+        except HerdrError:
+            return
+        self.announcer.progress(record, texts)
 
     def _spoken_on_screen(self, record, orchestrator):
         if record.nonce is None or orchestrator.status not in SETTLED:

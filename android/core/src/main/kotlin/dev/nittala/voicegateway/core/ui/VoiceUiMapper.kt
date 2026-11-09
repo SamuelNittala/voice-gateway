@@ -224,6 +224,7 @@ private fun screenOf(loop: LoopState, p: Phase): Screen = when (p) {
         VoiceMode.Working, "Agent working",
         when {
             p.sent?.maybeSent == true -> "May not have been sent; check the output."
+            loop.lastProgress != null -> loop.lastProgress
             p.sent != null -> p.sent.text
             else -> null
         },
